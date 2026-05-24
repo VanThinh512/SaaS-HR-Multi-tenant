@@ -1,0 +1,28 @@
+# Local environment configurations (contains secrets/passwords)
+.env
+
+# Python virtual environments & caching
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node/Vite packages and production build outputs
+node_modules/
+dist/
+build/
+.eslintcache
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
