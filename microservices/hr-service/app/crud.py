@@ -1,0 +1,117 @@
+from sqlalchemy.orm import Session
+import uuid
+from datetime import datetime
+from typing import List, Optional
+from app.models import Department, Employee, Attendance, LeaveRequest
+from app.schemas import EmployeeCreate, DepartmentCreate, LeaveRequestCreate
+
+# Department CRUD
+def get_departments(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[Department]:
+    return db.query(Department).filter(Department.tenant_id == tenant_id).offset(skip).limit(limit).all()
+
+def create_department(db: Session, tenant_id: str, payload: DepartmentCreate) -> Department:
+    db_dept = Department(
+        id=f"dept_{uuid.uuid4()}",
+        tenant_id=tenant_id,
+        name=payload.name,
+        description=payload.description
+    )
+    db.add(db_dept)
+    db.commit()
+    db.refresh(db_dept)
+    return db_dept
+
+# Employee CRUD
+def get_employees(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[Employee]:
+    return db.query(Employee).filter(Employee.tenant_id == tenant_id).offset(skip).limit(limit).all()
+
+def get_employee_by_id(db: Session, tenant_id: str, employee_id: str) -> Optional[Employee]:
+    return db.query(Employee).filter(
+        Employee.tenant_id == tenant_id,
+        Employee.id == employee_id
+    ).first()
+
+def create_employee(db: Session, tenant_id: str, payload: EmployeeCreate) -> Employee:
+    db_emp = Employee(
+        id=f"emp_{uuid.uuid4()}",
+        tenant_id=tenant_id,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        email=payload.email,
+        department_id=payload.department_id,
+        position=payload.position,
+        joined_date=payload.joined_date,
+        status="active"
+    )
+    db.add(db_emp)
+    db.commit()
+    db.refresh(db_emp)
+    return db_emp
+
+# Attendance CRUD
+def clock_in_employee(db: Session, tenant_id: str, employee_id: str) -> Attendance:
+    db_attendance = Attendance(
+        id=f"att_{uuid.uuid4()}",
+        tenant_id=tenant_id,
+        employee_id=employee_id,
+        check_in=datetime.now()
+    )
+    db.add(db_attendance)
+    db.commit()
+    db.refresh(db_attendance)
+    return db_attendance
+
+def clock_out_employee(db: Session, tenant_id: str, employee_id: str) -> Optional[Attendance]:
+    # Find active clock-in (where check_out is null)
+    db_attendance = db.query(Attendance).filter(
+        Attendance.tenant_id == tenant_id,
+        Attendance.employee_id == employee_id,
+        Attendance.check_out.is_(None)
+    ).order_by(Attendance.check_in.desc()).first()
+    
+    if db_attendance:
+        db_attendance.check_out = datetime.now()
+        db.commit()
+        db.refresh(db_attendance)
+    return db_attendance
+
+def get_attendance_logs(db: Session, tenant_id: str, employee_id: str) -> List[Attendance]:
+    return db.query(Attendance).filter(
+        Attendance.tenant_id == tenant_id,
+        Attendance.employee_id == employee_id
+    ).order_by(Attendance.check_in.desc()).all()
+
+# Leave Request CRUD
+def create_leave_request(db: Session, tenant_id: str, payload: LeaveRequestCreate) -> LeaveRequest:
+    db_leave = LeaveRequest(
+        id=f"leave_{uuid.uuid4()}",
+        tenant_id=tenant_id,
+        employee_id=payload.employee_id,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        leave_type=payload.leave_type,
+        reason=payload.reason,
+        status="pending"
+    )
+    db.add(db_leave)
+    db.commit()
+    db.refresh(db_leave)
+    return db_leave
+
+def get_pending_leave_requests(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[LeaveRequest]:
+    return db.query(LeaveRequest).filter(
+        LeaveRequest.tenant_id == tenant_id,
+        LeaveRequest.status == "pending"
+    ).offset(skip).limit(limit).all()
+
+def update_leave_status(db: Session, tenant_id: str, leave_id: str, status: str) -> Optional[LeaveRequest]:
+    db_leave = db.query(LeaveRequest).filter(
+        LeaveRequest.tenant_id == tenant_id,
+        LeaveRequest.id == leave_id
+    ).first()
+    
+    if db_leave:
+        db_leave.status = status
+        db.commit()
+        db.refresh(db_leave)
+    return db_leave
