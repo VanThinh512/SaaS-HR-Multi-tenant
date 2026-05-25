@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import date, datetime
@@ -25,6 +26,16 @@ class EmployeeCreate(BaseModel):
     department_id: Optional[str] = None
     position: str
     joined_date: date
+
+class EmployeeUpdate(BaseModel):
+    """Schema cập nhật nhân viên — tất cả trường đều tùy chọn (partial update)."""
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    department_id: Optional[str] = None
+    position: Optional[str] = None
+    status: Optional[str] = None  # 'active' | 'on_leave' | 'terminated'
+    joined_date: Optional[date] = None
 
 class EmployeeOut(BaseModel):
     id: str

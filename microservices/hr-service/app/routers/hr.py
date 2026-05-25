@@ -1,17 +1,20 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException, status
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
 from app.core.security import get_current_tenant_user
 from app.schemas import (
     DepartmentCreate, DepartmentOut,
-    EmployeeCreate, EmployeeOut,
+    EmployeeCreate, EmployeeUpdate, EmployeeOut,
     AttendanceOut,
     LeaveRequestCreate, LeaveRequestOut, LeaveRequestResolve
 )
 from app.crud import (
     get_departments, create_department,
     get_employees, get_employee_by_id, create_employee,
+    update_employee, delete_employee,
     clock_in_employee, clock_out_employee, get_attendance_logs,
     create_leave_request, get_pending_leave_requests, update_leave_status
 )
@@ -67,6 +70,35 @@ def add_employee(
     if current_user["role"] not in ["admin", "owner"]:
         raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
     return create_employee(db, tenant_id=current_user["tenant_id"], payload=payload)
+
+@router.put("/employees/{id}", response_model=EmployeeOut)
+def edit_employee(
+    id: str,
+    payload: EmployeeUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Cập nhật hồ sơ/chức vụ nhân viên. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    updated = update_employee(db, tenant_id=current_user["tenant_id"], employee_id=id, payload=payload)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Employee not found in your tenant workspace.")
+    return updated
+
+@router.delete("/employees/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_employee(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xóa nhân viên khỏi hệ thống của tenant. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    success = delete_employee(db, tenant_id=current_user["tenant_id"], employee_id=id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Employee not found in your tenant workspace.")
+    # HTTP 204 No Content — không trả về body
 
 # --- Attendance ---
 @router.post("/attendance/check-in", response_model=AttendanceOut, status_code=status.HTTP_201_CREATED)
