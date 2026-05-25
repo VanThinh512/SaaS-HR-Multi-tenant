@@ -1,9 +1,10 @@
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 import uuid
 from datetime import datetime
 from typing import List, Optional
 from app.models import Department, Employee, Attendance, LeaveRequest
-from app.schemas import EmployeeCreate, DepartmentCreate, LeaveRequestCreate
+from app.schemas import EmployeeCreate, EmployeeUpdate, DepartmentCreate, LeaveRequestCreate
 
 # Department CRUD
 def get_departments(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[Department]:
@@ -47,6 +48,41 @@ def create_employee(db: Session, tenant_id: str, payload: EmployeeCreate) -> Emp
     db.commit()
     db.refresh(db_emp)
     return db_emp
+
+def update_employee(
+    db: Session, tenant_id: str, employee_id: str, payload: EmployeeUpdate
+) -> Optional[Employee]:
+    """Cập nhật thông tin nhân viên theo tenant — chỉ ghi đè các trường được truyền vào."""
+    db_emp = db.query(Employee).filter(
+        Employee.tenant_id == tenant_id,
+        Employee.id == employee_id
+    ).first()
+
+    if not db_emp:
+        return None
+
+    # Partial update: chỉ cập nhật các trường không phải None
+    update_data = payload.model_dump(exclude_none=True)
+    for field, value in update_data.items():
+        setattr(db_emp, field, value)
+
+    db.commit()
+    db.refresh(db_emp)
+    return db_emp
+
+def delete_employee(db: Session, tenant_id: str, employee_id: str) -> bool:
+    """Xóa nhân viên khỏi tenant. Trả về True nếu xóa thành công, False nếu không tìm thấy."""
+    db_emp = db.query(Employee).filter(
+        Employee.tenant_id == tenant_id,
+        Employee.id == employee_id
+    ).first()
+
+    if not db_emp:
+        return False
+
+    db.delete(db_emp)
+    db.commit()
+    return True
 
 # Attendance CRUD
 def clock_in_employee(db: Session, tenant_id: str, employee_id: str) -> Attendance:
