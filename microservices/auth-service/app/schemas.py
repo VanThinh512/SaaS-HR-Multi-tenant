@@ -35,3 +35,39 @@ class UserOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class WorkspaceMemberOut(BaseModel):
+    user_id: str
+    email: EmailStr
+    status: str
+    role: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class UpdateRoleRequest(BaseModel):
+    role: str  # owner | admin | employee
+
+
+class MeOut(BaseModel):
+    id: str
+    email: EmailStr
+    status: str
+    active_tenant_id: str
+    role: str
+
+    class Config:
+        from_attributes = True
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class InviteUserRequest(BaseModel):
+    email: EmailStr
+    role: Optional[str] = "employee"  # owner | admin | employee

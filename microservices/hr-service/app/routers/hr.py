@@ -1,19 +1,22 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException, status
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
 from app.core.security import get_current_tenant_user
 from app.schemas import (
-    DepartmentCreate, DepartmentOut,
-    EmployeeCreate, EmployeeOut,
+    DepartmentCreate, DepartmentUpdate, DepartmentOut,
+    EmployeeCreate, EmployeeUpdate, EmployeeOut,
     AttendanceOut,
     LeaveRequestCreate, LeaveRequestOut, LeaveRequestResolve
 )
 from app.crud import (
-    get_departments, create_department,
+    get_departments, create_department, get_department_by_id, update_department, delete_department,
     get_employees, get_employee_by_id, create_employee,
-    clock_in_employee, clock_out_employee, get_attendance_logs,
-    create_leave_request, get_pending_leave_requests, update_leave_status
+    update_employee, delete_employee,
+    clock_in_employee, clock_out_employee, get_attendance_logs, get_all_attendance_logs,
+    create_leave_request, get_pending_leave_requests, get_my_leave_requests, update_leave_status
 )
 
 router = APIRouter(prefix="/api/v1/hr", tags=["HR Domain"])
@@ -37,6 +40,34 @@ def add_department(
     if current_user["role"] not in ["admin", "owner"]:
         raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
     return create_department(db, tenant_id=current_user["tenant_id"], payload=payload)
+
+@router.put("/departments/{id}", response_model=DepartmentOut)
+def edit_department(
+    id: str,
+    payload: DepartmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Cập nhật thông tin phòng ban. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    updated = update_department(db, tenant_id=current_user["tenant_id"], dept_id=id, payload=payload)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Department not found in your tenant workspace.")
+    return updated
+
+@router.delete("/departments/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_department(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xóa phòng ban. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    success = delete_department(db, tenant_id=current_user["tenant_id"], dept_id=id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Department not found in your tenant workspace.")
 
 # --- Employees ---
 @router.get("/employees", response_model=List[EmployeeOut])
@@ -67,6 +98,35 @@ def add_employee(
     if current_user["role"] not in ["admin", "owner"]:
         raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
     return create_employee(db, tenant_id=current_user["tenant_id"], payload=payload)
+
+@router.put("/employees/{id}", response_model=EmployeeOut)
+def edit_employee(
+    id: str,
+    payload: EmployeeUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Cập nhật hồ sơ/chức vụ nhân viên. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    updated = update_employee(db, tenant_id=current_user["tenant_id"], employee_id=id, payload=payload)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Employee not found in your tenant workspace.")
+    return updated
+
+@router.delete("/employees/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_employee(
+    id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xóa nhân viên khỏi hệ thống của tenant. Chỉ admin/owner mới có quyền."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    success = delete_employee(db, tenant_id=current_user["tenant_id"], employee_id=id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Employee not found in your tenant workspace.")
+    # HTTP 204 No Content — không trả về body
 
 # --- Attendance ---
 @router.post("/attendance/check-in", response_model=AttendanceOut, status_code=status.HTTP_201_CREATED)
@@ -112,6 +172,17 @@ def my_logs(
         
     return get_attendance_logs(db, tenant_id=current_user["tenant_id"], employee_id=matched_emp.id)
 
+@router.get("/attendance/all-logs", response_model=List[AttendanceOut])
+def all_logs(
+    skip: int = 0, limit: int = 200,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xem toàn bộ log chấm công của tất cả nhân viên trong tenant. Chỉ admin/owner."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    return get_all_attendance_logs(db, tenant_id=current_user["tenant_id"], skip=skip, limit=limit)
+
 # --- Leaves ---
 @router.post("/leaves", response_model=LeaveRequestOut, status_code=status.HTTP_201_CREATED)
 def submit_leave(
@@ -137,6 +208,18 @@ def list_pending_leaves(
     if current_user["role"] not in ["admin", "owner"]:
         raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
     return get_pending_leave_requests(db, tenant_id=current_user["tenant_id"], skip=skip, limit=limit)
+
+@router.get("/leaves/my-leaves", response_model=List[LeaveRequestOut])
+def my_leaves(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xem tất cả đơn nghỉ phép của bản thân (mọi trạng thái)."""
+    employees = get_employees(db, tenant_id=current_user["tenant_id"])
+    matched_emp = next((e for e in employees if e.email == current_user["email"]), None)
+    if not matched_emp:
+        raise HTTPException(status_code=404, detail="Employee profile not found for the authenticated user.")
+    return get_my_leave_requests(db, tenant_id=current_user["tenant_id"], employee_id=matched_emp.id)
 
 @router.put("/leaves/{id}", response_model=LeaveRequestOut)
 def resolve_leave(
