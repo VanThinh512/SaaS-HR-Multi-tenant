@@ -295,3 +295,79 @@ def invite_member(
         is_active=link.is_active,
     )
 
+
+# --- List Workspace Members ---
+
+@router.get("/tenants/users", response_model=List[WorkspaceMemberOut])
+def list_members(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Liệt kê tất cả thành viên active của tenant hiện tại. Yêu cầu quyền admin/owner."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    rows = get_users_by_tenant(db, current_user["tenant_id"])
+    return [
+        WorkspaceMemberOut(
+            user_id=user.id,
+            email=user.email,
+            status=user.status,
+            role=link.role,
+            is_active=link.is_active,
+        )
+        for link, user in rows
+    ]
+
+
+# --- Update Member Role ---
+
+@router.put("/tenants/users/{user_id}/role", response_model=WorkspaceMemberOut)
+def update_member_role(
+    user_id: str,
+    payload: UpdateRoleRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Cập nhật vai trò của thành viên. Chỉ owner mới được gán role 'owner'."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    if payload.role not in ["owner", "admin", "employee"]:
+        raise HTTPException(status_code=422, detail="Invalid role. Must be owner, admin, or employee.")
+    if payload.role == "owner" and current_user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="Only an owner can assign the owner role.")
+    if user_id == current_user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot change your own role.")
+
+    link = update_user_role_in_tenant(db, user_id, current_user["tenant_id"], payload.role)
+    if not link:
+        raise HTTPException(status_code=404, detail="Member not found in this workspace.")
+
+    target_user = get_user_by_id(db, user_id)
+    return WorkspaceMemberOut(
+        user_id=target_user.id,
+        email=target_user.email,
+        status=target_user.status,
+        role=link.role,
+        is_active=link.is_active,
+    )
+
+
+# --- Remove Member from Workspace ---
+
+@router.delete("/tenants/users/{user_id}", status_code=status.HTTP_200_OK)
+def remove_member(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_tenant_user)
+):
+    """Xóa thành viên khỏi workspace (soft delete). Không thể tự xóa chính mình."""
+    if current_user["role"] not in ["admin", "owner"]:
+        raise HTTPException(status_code=403, detail="Permission denied. Admin role required.")
+    if user_id == current_user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot remove yourself from the workspace.")
+
+    removed = remove_user_from_tenant(db, user_id, current_user["tenant_id"])
+    if not removed:
+        raise HTTPException(status_code=404, detail="Member not found or already removed.")
+    return {"message": "Member removed from workspace."}
+
