@@ -8,6 +8,10 @@ class DepartmentCreate(BaseModel):
     name: str
     description: Optional[str] = None
 
+class DepartmentUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
 class DepartmentOut(BaseModel):
     id: str
     tenant_id: str

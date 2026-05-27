@@ -11,6 +11,9 @@ class TenantUpdate(BaseModel):
     status: Optional[str] = None
     plan_tier: Optional[str] = None
 
+class TenantSelfUpdate(BaseModel):
+    name: Optional[str] = None
+
 class TenantOut(BaseModel):
     id: str
     name: str

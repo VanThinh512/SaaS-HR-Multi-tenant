@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 from app.models import Department, Employee, Attendance, LeaveRequest
-from app.schemas import EmployeeCreate, EmployeeUpdate, DepartmentCreate, LeaveRequestCreate
+from app.schemas import EmployeeCreate, EmployeeUpdate, DepartmentCreate, DepartmentUpdate, LeaveRequestCreate
 
 # Department CRUD
 def get_departments(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[Department]:
@@ -21,6 +21,31 @@ def create_department(db: Session, tenant_id: str, payload: DepartmentCreate) ->
     db.commit()
     db.refresh(db_dept)
     return db_dept
+
+def get_department_by_id(db: Session, tenant_id: str, dept_id: str) -> Optional[Department]:
+    return db.query(Department).filter(
+        Department.tenant_id == tenant_id,
+        Department.id == dept_id
+    ).first()
+
+def update_department(db: Session, tenant_id: str, dept_id: str, payload: DepartmentUpdate) -> Optional[Department]:
+    db_dept = get_department_by_id(db, tenant_id, dept_id)
+    if not db_dept:
+        return None
+    update_data = payload.model_dump(exclude_none=True)
+    for field, value in update_data.items():
+        setattr(db_dept, field, value)
+    db.commit()
+    db.refresh(db_dept)
+    return db_dept
+
+def delete_department(db: Session, tenant_id: str, dept_id: str) -> bool:
+    db_dept = get_department_by_id(db, tenant_id, dept_id)
+    if not db_dept:
+        return False
+    db.delete(db_dept)
+    db.commit()
+    return True
 
 # Employee CRUD
 def get_employees(db: Session, tenant_id: str, skip: int = 0, limit: int = 100) -> List[Employee]:
@@ -117,6 +142,12 @@ def get_attendance_logs(db: Session, tenant_id: str, employee_id: str) -> List[A
         Attendance.employee_id == employee_id
     ).order_by(Attendance.check_in.desc()).all()
 
+def get_all_attendance_logs(db: Session, tenant_id: str, skip: int = 0, limit: int = 200) -> List[Attendance]:
+    """Lấy toàn bộ log chấm công của tenant (dành cho admin/owner)."""
+    return db.query(Attendance).filter(
+        Attendance.tenant_id == tenant_id
+    ).order_by(Attendance.check_in.desc()).offset(skip).limit(limit).all()
+
 # Leave Request CRUD
 def create_leave_request(db: Session, tenant_id: str, payload: LeaveRequestCreate) -> LeaveRequest:
     db_leave = LeaveRequest(
@@ -139,6 +170,13 @@ def get_pending_leave_requests(db: Session, tenant_id: str, skip: int = 0, limit
         LeaveRequest.tenant_id == tenant_id,
         LeaveRequest.status == "pending"
     ).offset(skip).limit(limit).all()
+
+def get_my_leave_requests(db: Session, tenant_id: str, employee_id: str) -> List[LeaveRequest]:
+    """Lấy tất cả đơn nghỉ phép của nhân viên (mọi trạng thái)."""
+    return db.query(LeaveRequest).filter(
+        LeaveRequest.tenant_id == tenant_id,
+        LeaveRequest.employee_id == employee_id
+    ).order_by(LeaveRequest.start_date.desc()).all()
 
 def update_leave_status(db: Session, tenant_id: str, leave_id: str, status: str) -> Optional[LeaveRequest]:
     db_leave = db.query(LeaveRequest).filter(
