@@ -1,334 +1,448 @@
 # AWS Integration Plan — SaaS HR Multi-Tenant
 
-Migrate the current Docker Compose local development setup to the production AWS architecture described in [aws_architecture_design.md](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/aws_architecture_design.md).
+Migrate the current Docker Compose local development setup to the production AWS architecture described in [aws_architecture_design.md](aws_architecture_design.md).
 
-## Current State Summary
+> **Region: `ap-southeast-1` (Singapore)** · **IaC: Terraform** · **No CI/CD (manual / script-based)** · **Identity for team: IAM Identity Center** · **Budget ceiling: $120–$150/month** (projected ~$67/mo)
 
-| Component | Current Implementation | Target AWS Service |
+---
+
+## 1. Finalized Decisions (Locked 2026-06-11)
+
+| # | Topic | Decision | Rationale |
+|:--|:--|:--|:--|
+| 1 | **Deployment Region** | `ap-southeast-1` (Singapore) | End users are in **Vietnam only** → lowest API latency (~30–60 ms vs ~200–250 ms to `us-east-1`). AZs: `ap-southeast-1a`, `ap-southeast-1b`. |
+| 2 | **Region exceptions** | `us-east-1` for **2 global resources only** | (a) **ACM certificate for CloudFront** — CloudFront only trusts certs from N. Virginia. (b) **WAF Web ACL, `CLOUDFRONT` scope** — a global resource that must be created in `us-east-1`. Both run *at the edge* near Vietnam; `us-east-1` is only the control-plane home. |
+| 3 | **TLS Certificates** | **2 certificates** | Cert #1 in `us-east-1` for the **CloudFront** viewer domain. Cert #2 (optional) in `ap-southeast-1` for the **ALB** origin. Both issued free via AWS Certificate Manager (DNS-validated through Route 53). |
+| 4 | **IaC Tooling** | **Terraform** (OpenTofu-compatible) | Readable HCL across ~15 resource types, explicit remote state + locking for the 2-dev team, `plan` dry-run safety, huge module ecosystem. |
+| 5 | **DNS & Domain** | **Amazon Route 53 only** — no GoDaddy | Register the domain *directly in Route 53*; the public hosted zone is auto-created. One vendor, native ALIAS records to CloudFront, automatic ACM DNS validation. |
+| 6 | **CI/CD Pipeline** | ❌ **Not used** | All deployments are **manual / script-based** via `scripts/` (`push_ecr.sh`, `deploy_frontend.sh`, `rds_init.sh`) + `terraform apply` from a laptop. No GitHub Actions / CodePipeline / CodeBuild. |
+| 7 | **Team Access** | **AWS IAM Identity Center** (2 users) | Short-lived credentials (no long-lived keys on laptops), one SSO portal, `AdministratorAccess` permission set per dev. Root account locked + MFA. |
+| 8 | **Redis (Pub/Sub)** | **Dedicated Redis ECS service via Cloud Map Service Discovery**, on **Fargate Spot** | Redis is a *non-critical, eventually-consistent* message broker (not a datastore). A shared standalone ECS service (NOT a sidecar) reachable at `redis.saashr.local:6379` preserves the event-driven pattern at ~$3/mo vs ~$14/mo for ElastiCache. |
+| 9 | **Nginx API Gateway** | ❌ **Removed** | ALB performs path-based routing; FastAPI services already generate correlation IDs. Dropping the gateway task frees ~25% of compute and one ECR repo. |
+| 10 | **Identity Provider (app users)** | ✅ **AWS Cognito User Pools (Option B)** | Cognito is the committed identity provider — managed sign-up/sign-in, MFA, hosted UI, and JWT issuance — removing the need to maintain custom RS256 signing/rotation. Built in **Phase 5** (not deferred). Requires migrating the login flow to `InitiateAuth` and seeding existing users into the User Pool. |
+
+---
+
+## 2. Current State → Target Mapping
+
+| Component | Current Implementation | Target AWS Service (`ap-southeast-1` unless noted) |
 |:--|:--|:--|
-| API Gateway | Nginx container (`api-gateway/`) | ALB (path-based routing) |
-| Auth Service | FastAPI on port 8000 | ECS Fargate Spot task |
-| Tenant Service | FastAPI on port 8001 | ECS Fargate Spot task |
-| HR Service | FastAPI on port 8002 | ECS Fargate Spot task |
-| Frontend | Vite React → Nginx container | S3 + CloudFront |
-| Database | MySQL 8.0 container (3 schemas) | RDS MySQL `db.t4g.micro` |
-| Message Broker | Redis container | Redis container in ECS (or ElastiCache later) |
-| Auth/Identity | Custom RS256 JWT (`app/core/security.py`) | AWS Cognito User Pools (phased) |
-| Security/SOC | None | Wazuh on EC2 `t3.small` Spot |
-| DNS | localhost | Route 53 |
+| API Gateway | Nginx container (`api-gateway/`) | **ALB** (path-based routing) — *Nginx gateway removed* |
+| Auth Service | FastAPI on port 8000 | ECS **Fargate Spot** task |
+| Tenant Service | FastAPI on port 8001 | ECS **Fargate Spot** task |
+| HR Service | FastAPI on port 8002 | ECS **Fargate Spot** task |
+| Message Broker | Redis container | **Dedicated Redis ECS service** (Fargate Spot) + **Cloud Map** service discovery |
+| Frontend | Vite React → Nginx container | **S3** (private, OAC) + **CloudFront** |
+| Database | MySQL 8.0 container (3 schemas) | **RDS MySQL** `db.t4g.micro` (Single-AZ, auto-stop) |
+| Auth/Identity | Custom RS256 JWT (`security.py`) | **AWS Cognito User Pools** (User Pool + App Client, JWT/OIDC) — Phase 5 |
+| Edge security | None | **AWS WAF** (`CLOUDFRONT` scope, `us-east-1`) |
+| Security/SOC | None | **Wazuh** on EC2 `t3.small` Spot |
+| DNS / Domain | localhost | **Route 53** (domain registered in Route 53) |
+| TLS | None | **ACM** cert #1 `us-east-1` (CloudFront) + cert #2 `ap-southeast-1` (ALB, optional) |
+| Team access | — | **IAM Identity Center** (2 users, short-lived creds) |
+| Terraform state | — | **S3 backend** + native lockfile (`use_lockfile`) |
 
 ---
 
-## Open Questions
+## 3. Phase 0 — Account, Team Access & Terraform Backend (Prerequisite)
 
-> [!IMPORTANT]
-> **1. Infrastructure-as-Code (IaC) Tooling**
-> Do you prefer **Terraform**, **AWS CDK (Python)**, or **AWS CloudFormation (YAML)** for defining infrastructure? This affects the entire `infra/` directory structure. I recommend **Terraform** for its maturity and multi-cloud flexibility, but CDK Python might feel more natural given your FastAPI backend.
+> One-time foundation. Do this **before** any `infra/` resource so both developers can work simultaneously without colliding.
 
-> [!IMPORTANT]
-> **2. Cognito Migration Strategy**
-> Your current auth uses custom RS256 JWT signing in [security.py](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/auth-service/app/core/security.py). Do you want to:
-> - **(A)** Keep custom JWT initially and integrate Cognito in a later phase (lower risk, faster deployment)
-> - **(B)** Migrate to Cognito immediately as the identity provider (more rework upfront, but aligns with the architecture doc)
+### 3.1 Lock down the root account
+1. Sign in as **root** → enable **MFA** (authenticator app or hardware key).
+2. **Delete any root access keys** (`My Security Credentials`).
+3. Store the root password in a password manager; stop using root for daily work.
 
-> [!IMPORTANT]
-> **3. Domain Name**
-> Do you already have a domain name registered (or planned) for Route 53? This affects CloudFront distribution and ALB certificate setup.
+### 3.2 Enable IAM Identity Center (2 developers)
+1. Console → **IAM Identity Center** → **Enable**.
+2. **Users** → create 2 users (Dev A, Dev B), each with their own email.
+3. **Permission sets** → create `AdminAccess` → attach AWS-managed `AdministratorAccess`, session duration 8h.
+4. **AWS accounts** → select the account → assign **both** users the `AdminAccess` permission set.
+5. Each developer, on their own laptop:
+   ```bash
+   aws configure sso          # one-time: SSO start URL + region ap-southeast-1
+   aws sso login --profile saashr   # daily: refresh short-lived credentials
+   ```
+> Root stays locked; CloudTrail (on by default) records who did what. `AdministratorAccess` is the pragmatic choice for a 2-person team building all the infra — least-privilege scoping here just creates `AccessDenied` friction.
 
-> [!IMPORTANT]
-> **4. CI/CD Pipeline**
-> Do you want to set up CI/CD (GitHub Actions → ECR → ECS deploy) as part of this integration, or defer it?
+### 3.3 Bootstrap the Terraform remote state (the real "don't block each other" mechanism)
+IAM lets you both *in*; **shared, locked Terraform state** is what stops two simultaneous `apply`s from corrupting each other.
+1. Create **one S3 bucket** (versioning **ON**, encryption **ON**) in `ap-southeast-1`, e.g. `saashr-tfstate-<account-id>`. Create it once by hand or via a tiny `infra/bootstrap/` config (the state bucket can't live in the state it stores).
+2. Configure the backend with the **native S3 lockfile** (Terraform ≥ 1.10 — no separate DynamoDB table needed):
+   ```hcl
+   # infra/providers.tf
+   terraform {
+     required_version = ">= 1.10"
+     backend "s3" {
+       bucket       = "saashr-tfstate-<account-id>"
+       key          = "global/saashr.tfstate"
+       region       = "ap-southeast-1"
+       encrypt      = true
+       use_lockfile = true            # native S3 state locking
+     }
+   }
 
-> [!IMPORTANT]
-> **5. Redis Strategy**
-> Your `tenant-service` and `hr-service` use Redis Pub/Sub. On AWS, should we:
-> - **(A)** Run Redis as a sidecar container in ECS (cheapest, aligns with FinOps budget)
-> - **(B)** Use ElastiCache for Redis (managed, but ~$13+/month for `cache.t4g.micro`)
+   provider "aws" {                   # default — Singapore, used by ~95% of resources
+     region = "ap-southeast-1"
+   }
+
+   provider "aws" {                   # alias — N. Virginia, ONLY for CloudFront cert + WAF
+     alias  = "us_east_1"
+     region = "us-east-1"
+   }
+   ```
+3. **Working rule for 2 devs:** always `terraform plan` first; announce before `apply`; the lock makes concurrent applies wait instead of clobbering. Optionally split state by layer (`network` / `data` / `compute`) so each dev can own a layer.
 
 ---
 
-## Proposed Changes — 6 Phases
+## 4. Proposed Changes — 6 Build Phases
 
 ### Phase 1: AWS Foundation (VPC, Networking, Security Groups)
 
-Create the network backbone exactly as specified in the architecture document.
-
-#### [NEW] `infra/vpc.tf` (or equivalent IaC)
-- VPC `10.0.0.0/16` in `us-east-1`
-- Public Subnet A `10.0.1.0/24` (us-east-1a)
-- Public Subnet B `10.0.2.0/24` (us-east-1b)
-- Private Subnet A `10.0.11.0/24` (us-east-1a)
-- Private Subnet B `10.0.12.0/24` (us-east-1b)
-- Internet Gateway (no NAT Gateway — NAT-Less design per FinOps Strategy 3)
+#### [NEW] `infra/vpc.tf`
+- VPC `10.0.0.0/16` in **`ap-southeast-1`**
+- Public Subnet A `10.0.1.0/24` (`ap-southeast-1a`)
+- Public Subnet B `10.0.2.0/24` (`ap-southeast-1b`)
+- Private Subnet A `10.0.11.0/24` (`ap-southeast-1a`)
+- Private Subnet B `10.0.12.0/24` (`ap-southeast-1b`)
+- Internet Gateway (**no NAT Gateway** — NAT-Less design, FinOps Strategy 3)
 - Route tables: public subnets → IGW, private subnets → local only
 
 #### [NEW] `infra/security_groups.tf`
-- `sg-alb-gateway`: Ingress 80/443 from 0.0.0.0/0, Egress to `sg-ecs-fargate`
-- `sg-ecs-fargate`: Ingress 80 from `sg-alb-gateway` only, Egress 3306 to `sg-rds-db`, 1514/1515 to `sg-wazuh-soc`, 443 to 0.0.0.0/0
+- `sg-alb-gateway`: Ingress 80/443 from `0.0.0.0/0`, Egress to `sg-ecs-fargate`
+- `sg-ecs-fargate`: Ingress 80 from `sg-alb-gateway` only; Egress 3306 to `sg-rds-db`, 6379 to `sg-ecs-fargate` (Redis, intra-SG), 1514/1515 to `sg-wazuh-soc`, 443 to `0.0.0.0/0`
 - `sg-rds-db`: Ingress 3306 from `sg-ecs-fargate` only, no egress
 - `sg-wazuh-soc`: Ingress 1514/1515 from `sg-ecs-fargate`, 443 from team IPs only
 
 #### [NEW] `infra/variables.tf`
-- Region, CIDR blocks, team IP allowlist, environment tag
+- Region (`ap-southeast-1`), CIDR blocks, team IP allowlist, environment tag, domain name
 
 ---
 
 ### Phase 2: Data Layer (RDS + Secrets Manager)
 
-Migrate the local MySQL container to a managed RDS instance.
-
 #### [NEW] `infra/rds.tf`
-- RDS MySQL 8.0 on `db.t4g.micro` in private subnets
+- RDS MySQL 8.0 on `db.t4g.micro` (Graviton — available in `ap-southeast-1`) in private subnets
 - DB Subnet Group spanning Private Subnet A + B
-- Single-AZ deployment (cost optimization; Multi-AZ standby disabled)
+- Single-AZ (Multi-AZ standby disabled for cost)
 - 20 GB `gp3` storage, no auto-scaling initially
-- Parameter group with `character_set_server=utf8mb4`
-- Attach `sg-rds-db` security group
+- Parameter group: `character_set_server=utf8mb4`
+- Attach `sg-rds-db`
 
 #### [NEW] `infra/secrets.tf`
-- AWS Secrets Manager secret for `MYSQL_ROOT_PASSWORD`
-- AWS Secrets Manager secret for `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY`
-- Rotate-able secret policy
+- AWS Secrets Manager secret for the **RDS master password** (native rotation candidate)
+- `JWT_PRIVATE_KEY` / `JWT_PUBLIC_KEY` — *optional FinOps swap:* store as **SSM Parameter Store `SecureString`** (free) instead of Secrets Manager ($0.40/secret/mo) since they don't need rotation
 
 #### [MODIFY] `database/init.sql`
-- No structural changes needed. This script will be run manually against RDS once to bootstrap the 3 schemas (`auth_db`, `tenant_db`, `hr_db`). We'll document the procedure.
+- No structural changes. Run once against RDS to bootstrap the 3 schemas (`auth_db`, `tenant_db`, `hr_db`).
 
 #### [NEW] `scripts/rds_init.sh`
-- Shell script to connect to RDS via bastion/SSM Session Manager and execute `init.sql`
+- Connect to RDS via SSM Session Manager (no public bastion needed) and execute `init.sql`
 
 #### [NEW] `infra/scheduler.tf`
-- AWS EventBridge rule + Lambda function for RDS Auto-Stop/Start scheduler (Strategy 2)
-- Stop at 8:00 PM UTC+7, Start at 8:00 AM UTC+7, Mon-Fri only
-- Weekends: keep RDS stopped
+- EventBridge rule + Lambda to **Auto-Stop/Start RDS** (FinOps Strategy 2)
+- Stop 20:00 ICT (UTC+7), Start 08:00 ICT, Mon–Fri; weekends stopped
+- **Idempotent daily stop** — RDS auto-restarts 7 days after a manual stop, so the stop Lambda must re-stop it
 
 ##### Application Config Changes
-
-#### [MODIFY] [config.py](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/auth-service/app/core/config.py)
-- Add logic to fetch `DATABASE_URL` from AWS Secrets Manager when `AWS_SECRETS_ARN` environment variable is set
-- Fallback to environment variable for local development compatibility
-
-#### [MODIFY] [config.py](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/tenant-service/app/core/config.py) (tenant-service)
-- Same Secrets Manager integration pattern
-
-#### [MODIFY] [config.py](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/hr-service/app/core/config.py) (hr-service)
-- Same Secrets Manager integration pattern
-
-#### [NEW] `microservices/shared/aws_secrets.py`
-- Shared utility module for fetching secrets from AWS Secrets Manager using `boto3`
-- Caches secrets in-memory to avoid per-request API calls
-- Used by all 3 microservice `config.py` files
+- [MODIFY] `microservices/auth-service/app/core/config.py` — fetch `DATABASE_URL` from Secrets Manager / SSM when `AWS_SECRETS_ARN` is set; fall back to env var for local dev
+- [MODIFY] `microservices/tenant-service/app/core/config.py` — same pattern
+- [MODIFY] `microservices/hr-service/app/core/config.py` — same pattern
+- [NEW] `microservices/shared/aws_secrets.py` — shared `boto3` fetch + in-memory cache, used by all 3 services
 
 ---
 
-### Phase 3: Container Platform (ECR + ECS Fargate Spot)
-
-Containerize and deploy all backend services to ECS.
+### Phase 3: Container Platform (ECR + ECS Fargate Spot + Redis + ALB)
 
 #### [NEW] `infra/ecr.tf`
-- 4 ECR repositories: `saashr-gateway`, `saashr-auth`, `saashr-tenant`, `saashr-hr`
+- **3 ECR repositories**: `saashr-auth`, `saashr-tenant`, `saashr-hr` *(no `saashr-gateway` — Nginx gateway removed)*
 - Lifecycle policy: keep last 5 images, expire untagged after 1 day
 
 #### [NEW] `infra/ecs.tf`
-- ECS Cluster with Fargate Spot capacity provider (Strategy 1)
+- ECS Cluster with **Fargate Spot** capacity provider (Strategy 1)
 - Capacity provider strategy: `FARGATE_SPOT` weight=4, `FARGATE` weight=1 (fallback)
+- **AWS Cloud Map** private DNS namespace `saashr.local` for service discovery
 
 #### [NEW] `infra/ecs_tasks.tf`
 - **4 Task Definitions** (each 0.25 vCPU, 0.5 GB RAM):
-  1. `saashr-gateway` — Nginx proxy (ALB replaces most of its role, but kept for internal routing if needed)
-  2. `saashr-auth` — Auth FastAPI service
-  3. `saashr-tenant` — Tenant FastAPI service  
-  4. `saashr-hr` — HR FastAPI service
-- Task execution role with permissions for ECR pull, CloudWatch Logs, Secrets Manager read
-- Task role with permissions for Secrets Manager `GetSecretValue`
-- Log configuration: `awslogs` driver → CloudWatch Log Group `/ecs/saashr/`
+  1. `saashr-auth` — Auth FastAPI
+  2. `saashr-tenant` — Tenant FastAPI
+  3. `saashr-hr` — HR FastAPI
+  4. `saashr-redis` — **shared Redis broker** (`redis:alpine`), registered in Cloud Map as `redis.saashr.local:6379`, **no persistence** (ephemeral pub/sub)
+- `tenant-service` & `hr-service` set `REDIS_URL=redis://redis.saashr.local:6379/0`
+- Task execution role: ECR pull, CloudWatch Logs, Secrets Manager/SSM read
+- Task role: `GetSecretValue` / `ssm:GetParameter`
+- Logs: `awslogs` driver → CloudWatch `/ecs/saashr/`
 
 #### [NEW] `infra/alb.tf`
-- Application Load Balancer in public subnets
-- Target groups for each ECS service
-- Listener rules (path-based routing):
-  - `/api/v1/auth/*` → auth-service target group
-  - `/api/v1/tenants/*` → tenant-service target group  
-  - `/api/v1/hr/*` → hr-service target group
+- Application Load Balancer in public subnets (`sg-alb-gateway`)
+- Target groups per service; path-based listener rules:
+  - `/api/v1/auth/*` → auth-service
+  - `/api/v1/tenants/*` → tenant-service
+  - `/api/v1/hr/*` → hr-service
 - Health check paths: `/api/v1/{service}/health`
+- Optional HTTPS listener using ACM cert #2 (`ap-southeast-1`)
 
-#### [MODIFY] Dockerfiles (all 3 microservices + gateway)
-- Add `boto3` to [requirements.txt](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/auth-service/requirements.txt) (and equivalent for other services)
-- Optimize for smaller images (already using `python:3.11-slim`, which is good)
-
-> [!NOTE]
-> **Nginx Gateway Decision**: With ALB handling path-based routing, the Nginx gateway container becomes optional. We can either:
-> - Remove it entirely and let ALB route directly to service containers (recommended — saves 1 task's cost)
-> - Keep it as a sidecar for request correlation ID generation (but the services already handle this)
+#### [MODIFY] Dockerfiles (3 microservices)
+- Add `boto3` to each `requirements.txt`
+- Keep `python:3.11-slim` base (already optimal)
 
 ---
 
-### Phase 4: Frontend Deployment (S3 + CloudFront)
-
-Replace the frontend Nginx container with S3 static hosting + CloudFront CDN.
+### Phase 4: Frontend + DNS (S3 + CloudFront + Route 53)
 
 #### [NEW] `infra/s3_frontend.tf`
-- S3 bucket for React build artifacts (`saashr-frontend-{account-id}`)
-- Bucket policy: allow CloudFront OAC access only
-- Block all public access (served exclusively through CloudFront)
+- S3 bucket for React build (`saashr-frontend-{account-id}`), block all public access, CloudFront **OAC**-only policy
 
 #### [NEW] `infra/cloudfront.tf`
-- CloudFront distribution with two origins:
-  1. **S3 Origin** (default behavior) — serves React SPA (`index.html`, JS, CSS, assets)
-  2. **ALB Origin** (behavior: `/api/v1/*`) — proxies API calls to backend
-- Origin Access Control (OAC) for S3
-- Custom error response: 403/404 → `/index.html` with 200 status (SPA routing)
-- Cache policy: static assets cached aggressively, API calls pass-through
-- If domain available: ACM certificate + custom domain
+- CloudFront distribution, two origins:
+  1. **S3 origin** (default) — React SPA
+  2. **ALB origin** (`/api/v1/*`) — proxies API to backend in `ap-southeast-1`
+- OAC for S3; SPA error mapping 403/404 → `/index.html` (200)
+- Cache: static aggressive, API pass-through
+- **Viewer cert = ACM cert #1 in `us-east-1`** (declared with `provider = aws.us_east_1`)
+
+#### [NEW] `infra/route53.tf`
+- **Register the domain in Route 53** (or transfer in) → public hosted zone auto-created
+- **A/ALIAS** record `app.<domain>` → CloudFront distribution
+- ACM **DNS-validation** CNAME records (both certs) created automatically in the zone
+- Hosted zone cost ~$0.50/mo + queries
 
 #### [NEW] `scripts/deploy_frontend.sh`
-- Build React app: `npm run build`
-- Sync to S3: `aws s3 sync dist/ s3://bucket-name --delete`
-- Invalidate CloudFront cache: `aws cloudfront create-invalidation`
+- `npm run build` → `aws s3 sync dist/ s3://<bucket> --delete` → `aws cloudfront create-invalidation`
 
-#### [MODIFY] [vite.config.js](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/frontend/vite.config.js)
-- Configure API proxy base URL to use environment variable (`VITE_API_BASE_URL`)
-- For production: API calls go to CloudFront `/api/v1/*` which routes to ALB
-
-#### [NEW] `frontend/.env.production`
-- `VITE_API_BASE_URL=` (empty or CloudFront URL — relative paths work since CloudFront proxies `/api/v1/*`)
+#### [MODIFY] `frontend/vite.config.js` + [NEW] `frontend/.env.production`
+- `VITE_API_BASE_URL=` (empty/relative — CloudFront proxies `/api/v1/*` to ALB)
 
 ---
 
 ### Phase 5: Security Layer (WAF + Cognito)
 
 #### [NEW] `infra/waf.tf`
-- AWS WAF v2 Web ACL attached to CloudFront distribution
-- 3 Managed Rule Groups:
-  1. `AWSManagedRulesCommonRuleSet` — OWASP Top 10 protection
-  2. `AWSManagedRulesSQLiRuleSet` — SQL injection protection
-  3. `AWSManagedRulesAmazonIpReputationList` — Known bad IP blocking
-- Rate limiting rule: 2000 requests/5 min per IP
+- AWS WAF v2 Web ACL, **`CLOUDFRONT` scope → created with `provider = aws.us_east_1`** (global resource, control-plane in N. Virginia; rules execute at edge near Vietnam)
+- Attached to the CloudFront distribution
+- 3 Managed Rule Groups: `AWSManagedRulesCommonRuleSet`, `AWSManagedRulesSQLiRuleSet`, `AWSManagedRulesAmazonIpReputationList`
+- Rate-limit rule: 2000 req / 5 min per IP
 
-#### [NEW] `infra/cognito.tf` (Phase 5b — if Option B chosen)
-- Cognito User Pool with email-based sign-up
-- App client for React frontend (implicit or authorization code flow)
-- User Pool Groups mapping to roles: `owner`, `admin`, `employee`
-- Custom attributes: `tenant_id`
-- JWT token configuration matching current RS256 flow
+#### [NEW] `infra/cognito.tf` — **committed (Decision #10)**
+- Cognito **User Pool** with email-based sign-up/sign-in, password policy, optional MFA
+- **App Client** for the React frontend (authorization-code flow + Cognito Hosted UI, or Amplify/SDK)
+- **User Pool Groups** mapped to roles: `owner` / `admin` / `employee`
+- **Custom attribute** `custom:tenant_id` carried in the token to drive tenant isolation
+- Token config aligned with the services' existing RS256 verification — Cognito exposes a **JWKS endpoint** for public-key validation
 
-#### [MODIFY] Auth service code (Phase 5b — Cognito migration)
-- Replace custom JWT creation in [security.py](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/microservices/auth-service/app/core/security.py) with Cognito token validation
-- Update login flow to authenticate against Cognito instead of local `password_hash`
-- Migrate existing seed users to Cognito User Pool
+#### [MODIFY] Auth service code — Cognito migration
+- Replace custom JWT creation in `auth-service/app/core/security.py` with **Cognito token validation against the Cognito JWKS** (public keys)
+- Update the login flow to authenticate via Cognito (`InitiateAuth`) instead of comparing the local `password_hash`
+- `tenant-service` / `hr-service` verify Cognito-issued JWTs by pointing their public-key source at the Cognito **JWKS URL**
+
+#### [NEW] `scripts/migrate_users_cognito.sh`
+- One-time script to import existing seed users into the User Pool (`AdminCreateUser`), set `custom:tenant_id`, and force a password reset on first login
 
 ---
 
 ### Phase 6: Observability & SOC (Wazuh + CloudWatch)
 
 #### [NEW] `infra/wazuh_ec2.tf`
-- EC2 `t3.small` Spot Instance in Public Subnet A
-- Wazuh Manager AMI or user-data script for installation
-- 30 GB `gp3` EBS volume
-- Attach `sg-wazuh-soc` security group
-- Auto-stop scheduler (same EventBridge pattern as RDS)
+- EC2 `t3.small` **Spot** in Public Subnet A, Wazuh Manager via user-data, 30 GB `gp3`, `sg-wazuh-soc`, auto-stop scheduler (same EventBridge pattern)
 
 #### [NEW] `infra/cloudwatch.tf`
-- Log groups for each ECS service: `/ecs/saashr/auth`, `/ecs/saashr/tenant`, `/ecs/saashr/hr`, `/ecs/saashr/gateway`
-- Retention: 7 days (FinOps optimization)
-- CloudWatch Alarms:
-  - ECS task count < desired (service recovery alert)
-  - RDS CPU > 80%
-  - ALB 5xx error rate > 5%
+- Log groups `/ecs/saashr/{auth,tenant,hr,redis}`, retention **7 days**
+- Alarms: ECS running task count < desired, RDS CPU > 80%, ALB 5xx rate > 5%
 
-#### [MODIFY] Dockerfiles (all services)
-- Install Wazuh agent in container images
-- Configure agent to report to Wazuh Manager private IP on ports 1514/1515
+#### [MODIFY] Dockerfiles (3 services)
+- Install Wazuh agent, report to Wazuh Manager private IP on 1514/1515
 
 ---
 
-## New Directory Structure
+## 5. New Directory Structure
 
 ```text
 SaaS-HR-Multi-tenant/
-├── infra/                          # [NEW] Infrastructure-as-Code
-│   ├── main.tf                     # Provider config, backend state (S3)
-│   ├── variables.tf                # Input variables
-│   ├── outputs.tf                  # Exported values (ALB DNS, CloudFront URL, etc.)
-│   ├── vpc.tf                      # VPC, subnets, IGW, route tables
-│   ├── security_groups.tf          # All 4 security groups
-│   ├── rds.tf                      # RDS MySQL instance + subnet group
-│   ├── secrets.tf                  # Secrets Manager secrets
-│   ├── ecr.tf                      # ECR repositories
-│   ├── ecs.tf                      # ECS cluster + capacity providers
-│   ├── ecs_tasks.tf                # Task definitions + services
-│   ├── alb.tf                      # ALB + target groups + listener rules
-│   ├── s3_frontend.tf              # S3 bucket for React app
-│   ├── cloudfront.tf               # CloudFront distribution
-│   ├── waf.tf                      # WAF Web ACL + rules
-│   ├── cognito.tf                  # Cognito User Pools (Phase 5b)
-│   ├── wazuh_ec2.tf                # Wazuh EC2 Spot instance
-│   ├── cloudwatch.tf               # Log groups + alarms
-│   └── scheduler.tf                # EventBridge + Lambda for auto-stop
+├── infra/                          # [NEW] Terraform IaC
+│   ├── bootstrap/                  # [NEW] one-time: tfstate S3 bucket
+│   │   └── main.tf
+│   ├── providers.tf                # [NEW] default ap-southeast-1 + aws.us_east_1 alias + S3 backend
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── vpc.tf
+│   ├── security_groups.tf
+│   ├── rds.tf
+│   ├── secrets.tf
+│   ├── ecr.tf
+│   ├── ecs.tf                      # cluster + Cloud Map namespace
+│   ├── ecs_tasks.tf                # auth, tenant, hr, redis task defs + services
+│   ├── alb.tf
+│   ├── s3_frontend.tf
+│   ├── cloudfront.tf               # viewer cert via aws.us_east_1
+│   ├── route53.tf                  # [NEW] domain + hosted zone + ALIAS + ACM validation
+│   ├── waf.tf                      # CLOUDFRONT scope via aws.us_east_1
+│   ├── cognito.tf                  # Cognito User Pool + App Client (Phase 5 — IdP)
+│   ├── wazuh_ec2.tf
+│   ├── cloudwatch.tf
+│   └── scheduler.tf
 │
-├── scripts/                        # [NEW] Deployment & operations scripts
-│   ├── deploy_frontend.sh          # Build + S3 sync + CF invalidation
-│   ├── rds_init.sh                 # Bootstrap RDS with init.sql
-│   └── push_ecr.sh                 # Build + tag + push Docker images to ECR
+├── scripts/                        # [NEW] Manual deployment (no CI/CD)
+│   ├── push_ecr.sh                 # build + tag + push images, force ECS redeploy
+│   ├── deploy_frontend.sh          # build + S3 sync + CF invalidation
+│   ├── rds_init.sh                 # bootstrap RDS schemas via SSM
+│   └── migrate_users_cognito.sh    # [NEW] import seed users into Cognito User Pool
 │
 ├── microservices/
-│   ├── shared/                     # [NEW] Shared cross-service utilities
-│   │   └── aws_secrets.py          # Secrets Manager fetch + caching
+│   ├── shared/
+│   │   └── aws_secrets.py          # [NEW] Secrets Manager/SSM fetch + cache
 │   ├── auth-service/               # (modified config.py, requirements.txt)
 │   ├── tenant-service/             # (modified config.py, requirements.txt)
 │   └── hr-service/                 # (modified config.py, requirements.txt)
 │
 ├── frontend/
-│   ├── .env.production             # [NEW] Production env vars
+│   ├── .env.production             # [NEW]
 │   └── ...                         # (modified vite.config.js)
 │
-├── docker-compose.yml              # UNCHANGED — kept for local development
+├── api-gateway/                    # KEPT only for local docker-compose (not deployed to AWS)
+├── docker-compose.yml              # UNCHANGED — local dev
 └── ...
 ```
 
 ---
 
-## Verification Plan
+## 6. Step-by-Step Execution Runbook (Manual / Script-based)
 
-### Automated Tests
+> Run from a laptop authenticated via `aws sso login --profile saashr`. Each `terraform apply` is preceded by `terraform plan`.
+
+### Step 0 — Foundation (once)
 ```bash
-# Phase 1: Validate IaC syntax and plan
-terraform init && terraform validate && terraform plan
+# 0.1 Root: enable MFA, delete root keys (console)
+# 0.2 IAM Identity Center: enable, create 2 users, AdminAccess permission set, assign both
+# 0.3 Configure SSO on each laptop
+aws configure sso
+aws sso login --profile saashr
 
-# Phase 3: Verify ECS tasks are healthy
-aws ecs describe-services --cluster saashr-cluster --services saashr-auth saashr-tenant saashr-hr
-
-# Phase 4: Test CloudFront distribution
-curl -I https://<cloudfront-distribution>.cloudfront.net/
-curl https://<cloudfront-distribution>.cloudfront.net/api/v1/auth/health
+# 0.4 Bootstrap Terraform state bucket
+cd infra/bootstrap && terraform init && terraform apply   # creates saashr-tfstate-<acct-id>
 ```
 
-### Manual Verification
-- Verify RDS connectivity from ECS tasks via health endpoints
-- Test full login → API flow through CloudFront → ALB → ECS → RDS pipeline
-- Confirm WAF blocks SQL injection test payloads
-- Verify Wazuh dashboard is accessible only from team IPs
-- Confirm RDS auto-stop triggers at scheduled time
-- Run `docker-compose up` locally to confirm local dev workflow is unbroken
+### Step 1 — Network & Security
+```bash
+cd infra
+terraform init                       # wires the S3 backend (use_lockfile)
+terraform plan  -target=...vpc -target=...security_groups
+terraform apply -target=...vpc -target=...security_groups
+```
+
+### Step 2 — Data layer
+```bash
+terraform apply -target=aws_db_instance.mysql -target=...secrets -target=...scheduler
+# Initialize schemas (RDS is private → go through SSM)
+./scripts/rds_init.sh                 # runs database/init.sql against RDS
+```
+
+### Step 3 — Build & push images, deploy compute
+```bash
+# Build + push the 3 service images to ECR
+./scripts/push_ecr.sh auth tenant hr
+# Create cluster, Cloud Map, Redis service, task defs, services, ALB
+terraform apply -target=...ecr -target=...ecs -target=...ecs_tasks -target=...alb
+# Verify
+aws ecs describe-services --cluster saashr-cluster \
+  --services saashr-auth saashr-tenant saashr-hr saashr-redis --profile saashr
+```
+
+### Step 4 — Frontend + DNS
+```bash
+terraform apply -target=...s3_frontend -target=...cloudfront -target=...route53
+./scripts/deploy_frontend.sh          # build React, sync to S3, invalidate CF
+```
+
+### Step 5 — Edge security + Identity (Cognito)
+```bash
+terraform apply -target=...waf        # CLOUDFRONT-scope Web ACL (us-east-1 alias) + attach
+terraform apply -target=...cognito    # Cognito User Pool + App Client + groups + custom:tenant_id
+./scripts/migrate_users_cognito.sh    # one-time: import seed users into the User Pool
+```
+
+### Step 6 — SOC & monitoring
+```bash
+terraform apply -target=...wazuh_ec2 -target=...cloudwatch
+# Or simply: terraform apply   (converge everything, then re-run scripts as needed)
+```
+
+### Redeploy a code change later (no CI/CD)
+```bash
+./scripts/push_ecr.sh hr              # rebuild + push one service
+aws ecs update-service --cluster saashr-cluster --service saashr-hr \
+  --force-new-deployment --profile saashr
+```
 
 ---
 
-## Execution Order & Dependencies
+## 7. Verification Plan
+
+```bash
+# IaC integrity
+terraform init && terraform validate && terraform plan
+
+# ECS health
+aws ecs describe-services --cluster saashr-cluster \
+  --services saashr-auth saashr-tenant saashr-hr saashr-redis
+
+# End-to-end through CloudFront → ALB → ECS → RDS
+curl -I https://app.<domain>/
+curl https://app.<domain>/api/v1/auth/health
+curl https://app.<domain>/api/v1/tenants/health
+curl https://app.<domain>/api/v1/hr/health
+```
+Manual checks:
+- RDS reachable from ECS via `/health` endpoints
+- Full login → API flow works end-to-end
+- Pub/Sub: update a tenant status → confirm `hr-service` log shows the consumed event (Cloud Map resolution working)
+- WAF blocks a SQLi test payload
+- Wazuh dashboard reachable only from team IPs
+- RDS auto-stop fires on schedule (and re-stops idempotently)
+- `docker-compose up` still works locally (dev workflow unbroken)
+
+---
+
+## 8. Execution Order & Dependencies
 
 ```mermaid
 graph TD
-    P1["Phase 1: VPC & Security Groups"] --> P2["Phase 2: RDS + Secrets Manager"]
-    P1 --> P3["Phase 3: ECR + ECS Fargate Spot + ALB"]
+    P0["Phase 0: IAM Identity Center + Terraform State"] --> P1["Phase 1: VPC & Security Groups"]
+    P1 --> P2["Phase 2: RDS + Secrets"]
+    P1 --> P3["Phase 3: ECR + ECS Fargate Spot + Redis + ALB"]
     P2 --> P3
-    P3 --> P4["Phase 4: S3 + CloudFront"]
-    P4 --> P5["Phase 5: WAF + Cognito"]
+    P3 --> P4["Phase 4: S3 + CloudFront + Route 53"]
+    P4 --> P5["Phase 5: WAF + Cognito (Identity Provider)"]
     P3 --> P6["Phase 6: Wazuh EC2 + CloudWatch"]
     P5 --> P7["🎯 Production Ready"]
     P6 --> P7
 ```
 
 > [!TIP]
-> **Recommended approach**: Complete Phases 1–4 first. This gets you a working deployment on AWS. Phases 5–6 (WAF, Cognito, Wazuh) can be layered on incrementally without downtime.
+> Complete **Phase 0 → 4** first for a working AWS deployment. Layer Phase 5 (WAF/Cognito) and Phase 6 (Wazuh) incrementally without downtime.
 
-## Estimated Monthly Cost (Post-Deployment)
+---
 
-Per the [architecture document](file:///c:/Users/Admin/Desktop/SaaS-HR-Multi-tenant/aws_architecture_design.md): **~$56.99/month** with all FinOps optimizations applied, well under the $100–$120 budget ceiling.
+## 9. Estimated Monthly Cost — `ap-southeast-1` (Singapore)
+
+All FinOps optimizations applied (Fargate Spot, NAT-less, RDS/Wazuh auto-stop, 7-day logs). Singapore unit prices run ~10–20% above `us-east-1`.
+
+| AWS Service | Config | Est. Cost / Month |
+|:--|:--|:--:|
+| AWS WAF | 1 Web ACL + 3 managed rules + rate-limit | ~$9.00 |
+| CloudFront + S3 | 100 GB out, static React (CF free tier) | ~$1.00 |
+| Application Load Balancer | 1 ALB + ~1 LCU | ~$24.00 |
+| ECS Fargate Spot | 4 tasks (auth, tenant, hr, **redis**) @ 0.25 vCPU/0.5 GB, Spot | ~$12.00 |
+| RDS MySQL | `db.t4g.micro` + 20 GB gp3, auto-stop ~200 h/mo | ~$6.50 |
+| EC2 (Wazuh) | `t3.small` Spot + 30 GB gp3, auto-stop | ~$7.00 |
+| AWS Cognito | Free tier ≤ 50k MAU | $0.00 |
+| Route 53 | 1 hosted zone + queries + domain (amortized) | ~$2.00 |
+| Secrets Manager / SSM | RDS secret (JWT keys → free SSM) | ~$0.80 |
+| NAT Gateway | NAT-less design | $0.00 |
+| Data Transfer / CloudWatch | logs (7-day), inter-AZ | ~$4.00 |
+| ECR | image storage | ~$0.50 |
+| IAM Identity Center | team SSO | $0.00 |
+| **Total** | | **≈ $66.80 / month** |
+
+> [!NOTE]
+> **≈ $67/month** sits far under the **$120–$150** ceiling — leaving a **~$53–$83 buffer** for traffic spikes, extra test instances, or disabling auto-stop during demos. Re-price with the AWS Pricing Calculator set to **Asia Pacific (Singapore)** before committing.
