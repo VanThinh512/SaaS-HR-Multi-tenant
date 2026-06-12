@@ -11,20 +11,19 @@
 > Dev A (Admin) vào **AWS Console → IAM Identity Center → Users → Add user**, tạo tài khoản với email của Dev B.  
 > Dev B sẽ nhận email mời, đặt mật khẩu SSO của mình.
 
-### Bước duy nhất — Chạy setup script
-Sau khi clone repo từ GitHub:
-
+### Bước 1 — Setup AWS SSO
 ```powershell
 .\scripts\setup_aws_sso.ps1
 ```
+Cài AWS CLI + ghi profile `saashr` + login browser. Xong là có thể dùng `aws` CLI.
 
-Script sẽ tự động:
-1. ✅ Tải & cài **AWS CLI v2** (nếu chưa có)
-2. ✅ Ghi profile `saashr` vào `~/.aws/config` (SSO URL + Account ID đã được pre-fill sẵn)
-3. ✅ Mở browser để login SSO → xác nhận mã hiển thị
-4. ✅ Verify identity (`aws sts get-caller-identity`)
+### Bước 2 — Cài Terraform + kết nối S3 backend
+```powershell
+.\scripts\setup_terraform.ps1
+```
+Cài Terraform (nếu chưa có) + `terraform init` vào S3 backend + validate config.
 
-> **Không cần nhập URL hay Account ID** — đã được cấu hình sẵn trong script.
+> **Hai bước trên chỉ chạy 1 lần duy nhất trên mỗi máy.**
 
 ---
 
@@ -49,12 +48,13 @@ aws sts get-caller-identity --profile saashr
 
 | Script | Loại | Mục đích | Khi nào chạy |
 |:--|:--|:--|:--|
-| `setup_aws_sso.ps1` | `.ps1` Windows | Cài AWS CLI + cấu hình SSO (one-time) | Lần đầu setup máy |
+| `setup_aws_sso.ps1` | `.ps1` Windows | Cài AWS CLI + cấu hình SSO (one-time) | Lần đầu setup máy — **Bước 1** |
+| `setup_terraform.ps1` | `.ps1` Windows | Cài Terraform + terraform init S3 backend (one-time) | Lần đầu setup máy — **Bước 2** |
 | `sso_login.ps1` | `.ps1` Windows | Refresh SSO credentials (daily) | Mỗi sáng / khi hết hạn |
 | `push_ecr.sh` | `.sh` WSL/Git Bash | Build + tag + push images, force ECS redeploy | Sau mỗi thay đổi code |
 | `deploy_frontend.sh` | `.sh` WSL/Git Bash | Build React + S3 sync + CloudFront invalidation | Sau mỗi thay đổi frontend |
 | `rds_init.sh` | `.sh` WSL/Git Bash | Bootstrap RDS schemas via SSM (one-time) | Sau khi RDS được tạo |
-| `migrate_users_cognito.sh` | `.sh` WSL/Git Bash | Import seed users vào Cognito User Pool (one-time) | Phase 5 — sau khi Cognito tạo xong |
+| `migrate_users_cognito.sh` | `.sh` WSL/Git Bash | Import seed users vào Cognito User Pool (one-time) | Phase 5 - sau khi Cognito tạo xong |
 
 ---
 
