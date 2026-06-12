@@ -45,11 +45,22 @@ output "sg_wazuh_id" {
 # -------------------------------------------------------
 # Phase 2 outputs
 # -------------------------------------------------------
-# output "rds_endpoint" {
-#   description = "RDS MySQL endpoint"
-#   value       = aws_db_instance.mysql.endpoint
-#   sensitive   = true
-# }
+output "rds_endpoint" {
+  description = "RDS MySQL endpoint (host:port)"
+  value       = aws_db_instance.mysql.endpoint
+  sensitive   = true
+}
+
+output "rds_identifier" {
+  description = "RDS instance identifier"
+  value       = aws_db_instance.mysql.identifier
+}
+
+output "ssm_param_db_password" {
+  description = "SSM path for DB password"
+  value       = aws_ssm_parameter.db_password.name
+}
+
 
 # -------------------------------------------------------
 # Phase 3 outputs
