@@ -5,22 +5,42 @@
 # ============================================================
 
 # -------------------------------------------------------
-# Phase 1 outputs (sẽ uncomment sau khi vpc.tf apply xong)
+# Phase 1 outputs
 # -------------------------------------------------------
-# output "vpc_id" {
-#   description = "ID của VPC"
-#   value       = aws_vpc.main.id
-# }
-#
-# output "public_subnet_ids" {
-#   description = "IDs của public subnets (ALB)"
-#   value       = aws_subnet.public[*].id
-# }
-#
-# output "private_subnet_ids" {
-#   description = "IDs của private subnets (ECS, RDS)"
-#   value       = aws_subnet.private[*].id
-# }
+output "vpc_id" {
+  description = "ID cua VPC"
+  value       = aws_vpc.main.id
+}
+
+output "public_subnet_ids" {
+  description = "IDs cua public subnets (ALB + ECS NAT-Less)"
+  value       = aws_subnet.public[*].id
+}
+
+output "private_subnet_ids" {
+  description = "IDs cua private subnets (RDS)"
+  value       = aws_subnet.private[*].id
+}
+
+output "sg_alb_id" {
+  description = "Security Group ID: ALB"
+  value       = aws_security_group.alb.id
+}
+
+output "sg_ecs_fargate_id" {
+  description = "Security Group ID: ECS Fargate tasks"
+  value       = aws_security_group.ecs_fargate.id
+}
+
+output "sg_rds_id" {
+  description = "Security Group ID: RDS MySQL"
+  value       = aws_security_group.rds.id
+}
+
+output "sg_wazuh_id" {
+  description = "Security Group ID: Wazuh SOC"
+  value       = aws_security_group.wazuh.id
+}
 
 # -------------------------------------------------------
 # Phase 2 outputs
