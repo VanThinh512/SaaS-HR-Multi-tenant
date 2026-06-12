@@ -1,6 +1,6 @@
 # AWS Architecture Design & Extreme FinOps Optimization Plan
 **Project**: SaaS HR Multi-Tenant (FastAPI + ReactJS + Redis)  
-**Region**: ap-southeast-1 (Singapore)  
+**Region**: ap-southeast-1 (Singapore) · Single AWS Account  
 **Budget Target**: $100 - $120 / Month (Targeting < $70 / Month)  
 **Security Requirements**: Zero-Trust Network, AWS WAF, Wazuh SIEM/SOC, Cognito Integration  
 **Architect**: AWS Cloud Architect & FinOps Expert Team  
@@ -8,22 +8,24 @@
 ---
 
 ## 1. System Architecture Diagram
-The following architecture leverages Amazon CloudFront for edge delivery, AWS WAF for application protection, an Application Load Balancer (ALB) for request routing, ECS Fargate Spot for container orchestration, RDS for managed database services, and a dedicated EC2 instance in a separate SOC VPC for the Wazuh SOC Manager.
+The following architecture leverages Amazon CloudFront for edge delivery, AWS WAF for application protection, an Application Load Balancer (ALB) for request routing, ECS Fargate Spot for container orchestration, RDS for managed database services, and a dedicated EC2 instance inside the same VPC (within a dedicated SOC subnet) for the Wazuh SOC Manager.
 
 ![SaaS HR Multi-Tenant AWS Architecture Diagram](aws_architecture_diagram.png)
 
 ### Architecture Components Summary
 
-| Layer | AWS Service | Role | Subnet/Zone |
+| Layer / Zone | AWS Service | Role | Subnet/Zone |
 |:------|:-----------|:-----|:------------|
-| **DNS** | Amazon Route 53 | Domain name resolution → CloudFront | Global (Edge) |
-| **CDN & Security** | Amazon CloudFront + AWS WAF | Edge caching, DDoS protection, Web ACL filtering (WAF managed in us-east-1) | Global (Edge) |
-| **Static Hosting** | Amazon S3 | Serve React frontend build artifacts (Private access via Origin Access Control - OAC) | Regional (ap-southeast-1) |
-| **Identity** | AWS Cognito (User Pools) | Identity Provider (JWT/OIDC tokens, custom attribute: `custom:tenant_id`) | Regional (ap-southeast-1) |
-| **Load Balancing** | Application Load Balancer (ALB) | Path-based routing `/api/v1/*` to ECS target groups | Public Subnet (ap-southeast-1a / 1b) |
-| **Compute** | Amazon ECS Fargate Spot (4 Tasks) | Auth, Tenant, and HR services + Redis (Pub/Sub broker) with AWS Cloud Map discovery | Public Subnet (ap-southeast-1a / 1b) |
-| **Database** | Amazon RDS MySQL (db.t4g.micro) | Single instance hosting `auth_db`, `tenant_db`, `hr_db` | Private Subnet (ap-southeast-1a / 1b) |
-| **SIEM/SOC** | EC2 t3.small Spot (Wazuh Manager) | Centralized security monitoring & log analysis in separate SOC VPC | Public Subnet (SOC VPC) |
+| **DNS (Global Edge)** | Amazon Route 53 | Domain name resolution → CloudFront | Global (Edge) |
+| **CDN & Security (Edge)** | Amazon CloudFront + AWS WAF | Edge caching, DDoS protection, Web ACL filtering (WAF managed in us-east-1) | Global (Edge) |
+| **Static Hosting (Region)** | Amazon S3 | Serve React frontend build artifacts (Private access via Origin Access Control - OAC) | Regional (ap-southeast-1) |
+| **Identity (Region)** | AWS Cognito (User Pools) | Identity Provider (JWT/OIDC tokens, custom attribute: `custom:tenant_id`) | Regional (ap-southeast-1) |
+| **Secrets (Region)** | AWS Systems Manager (SSM) Parameter Store | SecureString configuration secrets storage (Static & Free tier) | Regional (ap-southeast-1) |
+| **Load Balancing (VPC)** | Application Load Balancer (ALB) | Path-based routing `/api/v1/*` to ECS target groups | Public Subnet (ap-southeast-1a / 1b) |
+| **Compute (VPC)** | Amazon ECS Fargate Spot (4 Tasks) | Auth, Tenant, and HR services + Redis (Pub/Sub broker) with AWS Cloud Map discovery | Public Subnet (ap-southeast-1a / 1b) |
+| **SIEM/SOC (VPC)** | EC2 t3.small Spot (Wazuh Manager) | Centralized security monitoring & log analysis (Same VPC, separate subnet) | Public Subnet SOC (ap-southeast-1a, 10.0.3.0/24) |
+| **Database (VPC)** | Amazon RDS MySQL (db.t4g.micro) | Single instance hosting `auth_db`, `tenant_db`, `hr_db` | Private Subnet (ap-southeast-1a / 1b) |
+| **Governance (Account)** | AWS IAM Identity Center + CloudTrail + AWS Budgets | SSO control, activity audit logs, and cost alerts ($100 budget trigger) | Account Level |
 
 ---
 
@@ -38,7 +40,7 @@ This calculation shows the contrast between standard AWS deployments and our **E
 | **ECS Fargate** | 4 Tasks (0.25 vCPU, 0.5 GB RAM each) | $32.40 | **$9.72** | **Fargate Spot** (saves 70% compared to On-Demand). |
 | **RDS MySQL** | 1 db.t4g.micro Instance (2 vCPU, 1GB RAM) + 20GB gp3 | $13.98 | **$5.70** | **Auto-Stop Scheduler** (running 10h/day, Mon-Fri). |
 | **EC2 (Wazuh)** | 1 t3.small Instance (2 vCPU, 2GB RAM) + 30GB gp3 | $17.58 | **$6.20** | **Spot EC2 Instance** + Auto-Stop outside testing. |
-| **AWS Cognito** | Cognito User Pools (Auth & Registration) | $0.00 | **$0.00** | **Free Tier** covers up to 50,000 Monthly Active Users. |
+| **AWS Cognito & SSM** | Cognito User Pools + SSM Parameter Store | $0.00 | **$0.00** | **Free Tier** covers MAUs and standard parameters. |
 | **NAT Gateway** | 1 NAT Gateway (Standard VPC requirement) | $32.85 | **$0.00** | **NAT-Less VPC Design** (ECS tasks run in public subnets). |
 | **Data Transfer/CloudWatch** | Logs, Inter-AZ bandwidth | $10.00 | **$3.00** | Log rotation & retention set to 7 days. |
 | **Total / Month** | | **$147.18** | **$56.99** | **Total savings: ~61% ($90.19 saved/mo)** |
@@ -69,21 +71,24 @@ This calculation shows the contrast between standard AWS deployments and our **E
 ---
 
 ## 4. VPC Network Subnet Design
-To maintain high availability and security, we segment the VPC (`10.0.0.0/16`) across two Availability Zones in Singapore (ap-southeast-1a and ap-southeast-1b):
+To maintain high availability and security, we segment a single VPC (`10.0.0.0/16`) across two Availability Zones in Singapore (ap-southeast-1a and ap-southeast-1b) with three subnet bands:
 
 ```
-VPC CIDR Block: 10.0.0.0/16
+VPC CIDR Block: 10.0.0.0/16 (Single VPC - App + SOC)
 ├── Availability Zone A (ap-southeast-1a)
-│   ├── Public Subnet A  (10.0.1.0/24)  --> Host ALB, ECS Tasks (AZ-A)
-│   └── Private Subnet A (10.0.11.0/24) --> Host RDS Primary Instance
+│   ├── Public Subnet A   (10.0.1.0/24)  --> Host ALB, ECS Tasks (AZ-A)
+│   ├── Public Subnet SOC (10.0.3.0/24)  --> Host EC2 Wazuh SIEM Manager (24/7)
+│   └── Private Subnet A  (10.0.11.0/24) --> Host RDS Primary Instance
 └── Availability Zone B (ap-southeast-1b)
-    ├── Public Subnet B  (10.0.2.0/24)  --> Host ALB, ECS Tasks (AZ-B)
-    └── Private Subnet B (10.0.12.0/24) --> Host RDS Standby (Optional/Disabled for Cost)
+    ├── Public Subnet B   (10.0.2.0/24)  --> Host ALB, ECS Tasks (AZ-B)
+    └── Private Subnet B  (10.0.12.0/24) --> Host RDS Standby (Optional/Disabled for Cost)
 ```
 
 *   **Public Subnets (10.0.1.0/24 & 10.0.2.0/24)**:
     *   **ALB**: Must live in the public subnets to receive traffic from CloudFront.
     *   **ECS Fargate Tasks**: Deployed here to utilize the Internet Gateway for direct, free outbound calls (avoiding NAT Gateway costs).
+*   **Public Subnet SOC (10.0.3.0/24)**:
+    *   **EC2 Wazuh Manager**: Deployed in a dedicated public subnet within the same VPC.
 *   **Private Subnets (10.0.11.0/24 & 10.0.12.0/24)**:
     *   **RDS MySQL**: Kept strictly private. No internet traffic can ever reach these subnets. Databases communicate only with the private IP addresses of the Fargate tasks in the public subnets.
 
@@ -118,7 +123,7 @@ Traffic is strictly controlled using Stateful Security Groups (SGs). No componen
 *   **Egress (Outbound)**:
     *   Allow TCP Port `3306` to `sg-rds-db`.
     *   Allow TCP Ports `1514` (Wazuh Agent registration) and `1515` (Wazuh Agent keepalive/logs) to `sg-wazuh-soc`.
-    *   Allow TCP Port `443` to `Anywhere (0.0.0.0/0)` (to download packages, fetch ECR, and connect to AWS Cognito).
+    *   Allow TCP Port `443` to `Anywhere (0.0.0.0/0)` (to download packages, fetch ECR, read secrets from SSM Parameter Store, and connect to AWS Cognito).
 
 ### 3. RDS Security Group (`sg-rds-db`)
 *   **Ingress (Inbound)**:
@@ -136,8 +141,9 @@ Traffic is strictly controlled using Stateful Security Groups (SGs). No componen
 ---
 
 ## 6. How this Highlights Microservices & AWS Synergy
+*   **Secrets Management**: Integrates **AWS Systems Manager (SSM) Parameter Store** to load encrypted configuration secrets (SecureString) securely into containers at startup without exposing configuration in raw files.
 *   **Service Discovery**: Leverages **AWS Cloud Map** for internal namespace routing (`redis.saashr.local:6379`) to connect microservices with the Redis Pub/Sub task without exposing port 6379 publicly.
 *   **Stateless Scaling**: By segregating states into Cognito (Auth) and RDS (Data), backend Fargate containers can be scale-tested, destroyed, and restarted instantly across different AZs using cheap Spot capacity.
 *   **Dynamic Routing at the Edge**: CloudFront and ALB act as the routing gateway. Front-end React pages are served directly from an S3 bucket at the Edge, while API calls `/api/v1/auth`, `/api/v1/tenants`, and `/api/v1/hr` are dynamically routed to the appropriate backend target groups on ECS.
 *   **SOC Auditing**: Wazuh agents embedded in the Fargate tasks stream security telemetry logs (failed logins, container modifications, SQL queries) to the EC2 Wazuh Manager in real time, demonstrating enterprise compliance (SOC2/ISO27001 readiness) under a bootstrapping budget.
-*   **Infrastructure as Code (IaC)**: Deploy and manage all VPC subnets, SGs, ECS tasks, and RDS databases reproducibly using manual **Terraform** (`terraform apply`) configurations.
+*   **Infrastructure as Code (IaC) & Governance**: Deploy and manage all VPC subnets, SGs, ECS tasks, and RDS databases reproducibly using manual **Terraform** (`terraform apply`) configurations. Track API activities with **AWS CloudTrail** and enforce budget controls via **AWS Budgets** ($100 alert).

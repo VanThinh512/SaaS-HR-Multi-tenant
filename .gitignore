@@ -1,5 +1,23 @@
 # Local environment configurations (contains secrets/passwords)
 .env
+.env.*
+!.env_example
+
+# AWS credentials — NEVER commit these
+.aws/
+*.pem
+*.p12
+
+# Terraform state & secrets — NEVER commit
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+crash.log
+crash.*.log
 
 # Python virtual environments & caching
 venv/

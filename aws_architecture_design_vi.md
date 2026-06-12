@@ -1,6 +1,6 @@
 # Thiết Kế Kiến Trúc AWS & Kế Hoạch Tối Ưu Chi Phí Cực Hạn (FinOps)
 **Dự án**: SaaS HR Multi-Tenant (FastAPI + ReactJS + Redis)  
-**Vùng**: ap-southeast-1 (Singapore)  
+**Vùng**: ap-southeast-1 (Singapore) · Một Tài Khoản AWS Duy Nhất  
 **Ngân sách mục tiêu**: $100 - $120 / Tháng (Mục tiêu đạt < $70 / Tháng)  
 **Yêu cầu bảo mật**: Mạng Zero-Trust, AWS WAF, Wazuh SIEM/SOC, Tích hợp Cognito  
 **Kiến trúc sư**: Đội ngũ AWS Cloud Architect & FinOps Expert  
@@ -9,22 +9,24 @@
 
 ## 1. Sơ Đồ Kiến Trúc Hệ Thống
 
-Kiến trúc dưới đây sử dụng Amazon CloudFront để phân phối nội dung tại biên (Edge), AWS WAF để bảo vệ ứng dụng, Application Load Balancer (ALB) để điều hướng request, ECS Fargate Spot để điều phối container, RDS để quản lý cơ sở dữ liệu, và một máy chủ EC2 chuyên dụng trong một VPC SOC riêng biệt cho Wazuh SOC Manager.
+Kiến trúc dưới đây sử dụng Amazon CloudFront để phân phối nội dung tại biên (Edge), AWS WAF để bảo vệ ứng dụng, Application Load Balancer (ALB) để điều hướng request, ECS Fargate Spot để điều phối container, RDS để quản lý cơ sở dữ liệu, và một máy chủ EC2 chuyên dụng (nằm trong cùng VPC nhưng tách biệt subnet SOC) cho Wazuh SOC Manager.
 
 ![Sơ đồ kiến trúc AWS - SaaS HR Multi-Tenant](aws_architecture_diagram.png)
 
 ### Bảng Tổng Hợp Thành Phần Kiến Trúc
 
-| Tầng | Dịch Vụ AWS | Vai Trò | Vị Trí Mạng |
+| Tầng / Vùng | Dịch Vụ AWS | Vai Trò | Vị Trí Mạng |
 |:-----|:-----------|:--------|:------------|
-| **DNS** | Amazon Route 53 | Phân giải tên miền → CloudFront | Global (Edge) |
-| **CDN & Bảo mật** | Amazon CloudFront + AWS WAF | Cache tại biên, chống DDoS, lọc Web ACL (WAF quản lý tại us-east-1) | Global (Edge) |
-| **Hosting tĩnh** | Amazon S3 | Phục vụ bản build React frontend (Truy cập riêng tư qua Origin Access Control - OAC) | Regional (ap-southeast-1) |
-| **Xác thực** | AWS Cognito (User Pools) | Quản lý xác thực người dùng, phát hành JWT token (custom attribute: `custom:tenant_id`) | Regional (ap-southeast-1) |
-| **Cân bằng tải** | Application Load Balancer (ALB) | Điều hướng theo đường dẫn `/api/v1/*` đến các target groups của ECS | Public Subnet (ap-southeast-1a / 1b) |
-| **Tính toán** | Amazon ECS Fargate Spot (4 Tasks) | Auth, Tenant, HR microservices + Redis (Pub/Sub broker) kết nối qua AWS Cloud Map | Public Subnet (ap-southeast-1a / 1b) |
-| **Cơ sở dữ liệu** | Amazon RDS MySQL (db.t4g.micro) | 1 instance chứa 3 database: `auth_db`, `tenant_db`, `hr_db` | Private Subnet (ap-southeast-1a / 1b) |
-| **Giám sát SIEM/SOC** | EC2 t3.small Spot (Wazuh Manager) | Trung tâm giám sát an ninh & phân tích log tập trung trong VPC SOC | Public Subnet (SOC VPC) |
+| **DNS (Global Edge)** | Amazon Route 53 | Phân giải tên miền → CloudFront | Global (Edge) |
+| **CDN & Bảo mật (Edge)** | Amazon CloudFront + AWS WAF | Cache tại biên, chống DDoS, lọc Web ACL (WAF quản lý tại us-east-1) | Global (Edge) |
+| **Hosting tĩnh (Region)** | Amazon S3 | Phục vụ bản build React frontend (Truy cập riêng tư qua Origin Access Control - OAC) | Regional (ap-southeast-1) |
+| **Xác thực (Region)** | AWS Cognito (User Pools) | Quản lý xác thực người dùng, phát hành JWT token (custom attribute: `custom:tenant_id`) | Regional (ap-southeast-1) |
+| **Quản lý khóa (Region)** | AWS SSM Parameter Store | Lưu trữ cấu hình bí mật mã hóa dưới dạng SecureString (Tĩnh & Miễn phí) | Regional (ap-southeast-1) |
+| **Cân bằng tải (VPC)** | Application Load Balancer (ALB) | Điều hướng theo đường dẫn `/api/v1/*` đến các target groups của ECS | Public Subnet (ap-southeast-1a / 1b) |
+| **Tính toán (VPC)** | Amazon ECS Fargate Spot (4 Tasks) | Auth, Tenant, HR microservices + Redis (Pub/Sub broker) kết nối qua AWS Cloud Map | Public Subnet (ap-southeast-1a / 1b) |
+| **Giám sát SIEM/SOC (VPC)** | EC2 t3.small Spot (Wazuh Manager) | Trung tâm giám sát an ninh & phân tích log tập trung (Cùng VPC, subnet riêng) | Public Subnet SOC (ap-southeast-1a, 10.0.3.0/24) |
+| **Cơ sở dữ liệu (VPC)** | Amazon RDS MySQL (db.t4g.micro) | 1 instance chứa 3 database: `auth_db`, `tenant_db`, `hr_db` | Private Subnet (ap-southeast-1a / 1b) |
+| **Quản trị (Account)** | AWS IAM Identity Center + CloudTrail + AWS Budgets | Quản lý SSO, kiểm toán hoạt động hệ thống và cảnh báo ngân sách ($100 alert) | Cấp độ Tài khoản |
 
 ---
 
@@ -40,7 +42,7 @@ Bảng tính dưới đây so sánh giữa triển khai AWS tiêu chuẩn và ph
 | **ECS Fargate** | 4 Tasks (0.25 vCPU, 0.5 GB RAM mỗi task) | $32.40 | **$9.72** | **Fargate Spot** (tiết kiệm 70% so với On-Demand). |
 | **RDS MySQL** | 1 Instance db.t4g.micro (2 vCPU, 1GB RAM) + 20GB gp3 | $13.98 | **$5.70** | **Lập lịch tự động tắt** (chạy 10h/ngày, Thứ 2 - Thứ 6). |
 | **EC2 (Wazuh)** | 1 Instance t3.small (2 vCPU, 2GB RAM) + 30GB gp3 | $17.58 | **$6.20** | **EC2 Spot Instance** + Tự động tắt ngoài giờ test. |
-| **AWS Cognito** | Cognito User Pools (Xác thực & Đăng ký) | $0.00 | **$0.00** | **Free Tier** hỗ trợ đến 50.000 người dùng hoạt động/tháng. |
+| **AWS Cognito & SSM** | Cognito User Pools + SSM Parameter Store | $0.00 | **$0.00** | **Free Tier** hỗ trợ đến 50.000 MAU và lưu trữ tham số miễn phí. |
 | **NAT Gateway** | 1 NAT Gateway (Yêu cầu VPC tiêu chuẩn) | $32.85 | **$0.00** | **Thiết kế VPC không cần NAT** (ECS chạy trong public subnets). |
 | **Data Transfer/CloudWatch** | Logs, băng thông liên AZ | $10.00 | **$3.00** | Luân chuyển log & giữ lại tối đa 7 ngày. |
 | **Tổng / Tháng** | | **$147.18** | **$56.99** | **Tổng tiết kiệm: ~61% ($90.19 tiết kiệm/tháng)** |
@@ -72,21 +74,24 @@ Bảng tính dưới đây so sánh giữa triển khai AWS tiêu chuẩn và ph
 
 ## 4. Thiết Kế Mạng VPC & Phân Vùng Subnet
 
-Để duy trì tính sẵn sàng cao (High Availability) và bảo mật, chúng tôi phân đoạn VPC (`10.0.0.0/16`) trên 2 Vùng Khả dụng (Availability Zone - AZ) tại Singapore (ap-southeast-1a và ap-southeast-1b):
+Để duy trì tính sẵn sàng cao (High Availability) và bảo mật, chúng tôi sử dụng một VPC duy nhất (`10.0.0.0/16`) được phân đoạn trên 2 Vùng Khả dụng (Availability Zone - AZ) tại Singapore (ap-southeast-1a và ap-southeast-1b) với ba dải subnet:
 
 ```
-Khối CIDR VPC: 10.0.0.0/16
+Khối CIDR VPC: 10.0.0.0/16 (VPC duy nhất - Ứng dụng + SOC)
 ├── Vùng Khả dụng A (ap-southeast-1a)
-│   ├── Public Subnet A  (10.0.1.0/24)  --> Chứa ALB, ECS Tasks (AZ-A)
-│   └── Private Subnet A (10.0.11.0/24) --> Chứa RDS MySQL (Instance chính)
+│   ├── Public Subnet A   (10.0.1.0/24)  --> Chứa ALB, ECS Tasks (AZ-A)
+│   ├── Public Subnet SOC (10.0.3.0/24)  --> Chứa EC2 Wazuh SIEM Manager (24/7)
+│   └── Private Subnet A  (10.0.11.0/24) --> Chứa RDS MySQL (Instance chính)
 └── Vùng Khả dụng B (ap-southeast-1b)
-    ├── Public Subnet B  (10.0.2.0/24)  --> Chứa ALB, ECS Tasks (AZ-B)
-    └── Private Subnet B (10.0.12.0/24) --> Chứa RDS Standby (Tùy chọn/Tắt để tiết kiệm)
+    ├── Public Subnet B   (10.0.2.0/24)  --> Chứa ALB, ECS Tasks (AZ-B)
+    └── Private Subnet B  (10.0.12.0/24) --> Chứa RDS Standby (Tùy chọn/Tắt để tiết kiệm)
 ```
 
 *   **Public Subnets (10.0.1.0/24 & 10.0.2.0/24)**:
     *   **ALB**: Phải đặt trong public subnets để nhận lưu lượng từ CloudFront.
     *   **ECS Fargate Tasks**: Triển khai tại đây để tận dụng Internet Gateway cho các cuộc gọi ra ngoài miễn phí (tránh chi phí NAT Gateway).
+*   **Public Subnet SOC (10.0.3.0/24)**:
+    *   **EC2 Wazuh Manager**: Triển khai trong một public subnet chuyên dụng dành riêng cho SOC nằm trong cùng VPC của hệ thống.
 *   **Private Subnets (10.0.11.0/24 & 10.0.12.0/24)**:
     *   **RDS MySQL**: Được cách ly nghiêm ngặt. Không có lưu lượng internet nào có thể truy cập vào các subnet này. Database chỉ giao tiếp với địa chỉ IP nội bộ của các Fargate tasks trong public subnets.
 
@@ -119,10 +124,10 @@ Lưu lượng được kiểm soát chặt chẽ bằng các Security Group có 
 ### 2. Security Group cho ECS Fargate (`sg-ecs-fargate`)
 *   **Ingress (Chiều vào)**:
     *   Cho phép TCP Port `80` (hoặc port container đích) **CHỈ TỪ** nguồn `sg-alb-gateway`. *Điều này chặn mọi người trên internet kết nối trực tiếp đến container, dù chúng có IP công khai.*
-*   **Egress (Chiều ra)**:
+*   **Egress (Outbound)**:
     *   Cho phép TCP Port `3306` đến `sg-rds-db`.
     *   Cho phép TCP Port `1514` (Đăng ký Wazuh Agent) và `1515` (Gửi log Wazuh Agent) đến `sg-wazuh-soc`.
-    *   Cho phép TCP Port `443` đến `Anywhere (0.0.0.0/0)` (để tải thư viện, kéo image ECR, và kết nối AWS Cognito).
+    *   Cho phép TCP Port `443` đến `Anywhere (0.0.0.0/0)` (để tải thư viện, kéo image ECR, lấy cấu hình mật từ SSM Parameter Store, và kết nối AWS Cognito).
 
 ### 3. Security Group cho RDS (`sg-rds-db`)
 *   **Ingress (Chiều vào)**:
@@ -141,8 +146,9 @@ Lưu lượng được kiểm soát chặt chẽ bằng các Security Group có 
 
 ## 6. Điểm Nổi Bật Của Kiến Trúc Microservices Kết Hợp AWS
 
-*   **Đăng Ký & Phát Hiện Dịch Vụ (Service Discovery)**: Sử dụng **AWS Cloud Map** để thiết lập hệ thống định danh nội bộ (`redis.saashr.local:6379`) giúp các microservice kết nối an toàn với Redis Pub/Sub mà không cần công khai cổng 6379 ra internet.
+*   **Quản Lý Khóa Bí Mật Bảo Mật**: Tích hợp **AWS Systems Manager (SSM) Parameter Store** dưới dạng tham số mã hóa `SecureString` để nạp các thông tin cấu hình nhạy cảm trực tiếp vào các container khi khởi chạy, không lưu lộ khóa ở tệp cấu hình thô.
+*   **Đăng Ký & Phát Hiện Dịch Vụ (Service Discovery)**: Sử dụng **AWS Cloud Map** để thiết lập định danh nội bộ (`redis.saashr.local:6379`) giúp các microservice kết nối an toàn với Redis Pub/Sub mà không cần công khai cổng 6379 ra internet.
 *   **Khả năng mở rộng phi trạng thái (Stateless Scaling)**: Bằng cách tách biệt trạng thái vào Cognito (Xác thực) và RDS (Dữ liệu), các container Fargate backend có thể được kiểm thử, hủy bỏ, và khởi động lại tức thì trên các AZ khác nhau sử dụng tài nguyên Spot giá rẻ.
 *   **Điều hướng động tại biên (Dynamic Edge Routing)**: CloudFront và ALB đóng vai trò cổng điều hướng. Trang React frontend được phục vụ trực tiếp từ S3 Bucket tại biên, trong khi các cuộc gọi API `/api/v1/auth`, `/api/v1/tenants`, và `/api/v1/hr` được điều hướng động đến các target groups ECS tương ứng.
 *   **Kiểm toán SOC (SOC Auditing)**: Wazuh agents được nhúng trong các Fargate tasks liên tục truyền log bảo mật (đăng nhập thất bại, thay đổi container, truy vấn SQL) đến EC2 Wazuh Manager theo thời gian thực, chứng minh sự sẵn sàng tuân thủ doanh nghiệp (SOC2/ISO27001) dưới ngân sách khởi nghiệp.
-*   **Hạ Tầng Dưới Dạng Mã Nguồn (IaC)**: Toàn bộ cấu trúc VPC, Security Groups, ECS Cluster Tasks và RDS Database được quản lý đồng nhất bằng mã nguồn **Terraform** (`terraform apply`), giúp việc cấu hình thủ công mang tính lặp lại chuẩn xác và dễ quản lý.
+*   **Hạ Tầng Dưới Dạng Mã Nguồn (IaC) & Quản Trị**: Toàn bộ cấu trúc VPC, Security Groups, ECS Cluster Tasks và RDS Database được quản lý đồng nhất bằng mã nguồn **Terraform** (`terraform apply`). Cùng với đó, kiểm soát toàn diện bằng nhật ký hoạt động **AWS CloudTrail** và kiểm soát hạn mức ngân sách qua **AWS Budgets** (gửi cảnh báo khi dự toán chạm mức $100).
