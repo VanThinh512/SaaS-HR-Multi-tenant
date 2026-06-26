@@ -7,7 +7,7 @@ from app.crud import (
     get_tenant_by_id, get_tenant_by_subdomain, get_all_tenants,
     create_tenant, update_tenant, update_tenant_self, delete_tenant
 )
-from app.core.redis import publish_tenant_status_event
+from app.core.sqs import publish_tenant_status_event
 from app.core.security import get_current_tenant_user
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["Tenants"])
@@ -97,7 +97,7 @@ def admin_update_tenant(
 
     updated = update_tenant(db, tenant, status=payload.status, plan_tier=payload.plan_tier)
 
-    # Phát sự kiện Redis nếu trạng thái thay đổi (để hr-service cập nhật dữ liệu liên quan)
+    # Phát sự kiện SQS nếu trạng thái thay đổi (để hr-service cập nhật dữ liệu liên quan)
     if payload.status and payload.status != tenant.status:
         publish_tenant_status_event(tenant_id=id, new_status=payload.status)
 

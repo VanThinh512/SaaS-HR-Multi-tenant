@@ -21,22 +21,6 @@ services:
       timeout: 5s
       retries: 5
 
-  redis-broker:
-    image: redis:alpine
-    container_name: saashr-redis
-    restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - saashr-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   auth-service:
     build:
       context: ./microservices/auth-service
@@ -71,13 +55,12 @@ services:
       - MYSQL_HOST=mysql-db
       - MYSQL_PORT=3306
       - DATABASE_URL=mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-strongpassword123}@mysql-db:3306/tenant_db
-      - REDIS_URL=redis://redis-broker:6379/0
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+      - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
       - JWT_ALGORITHM=${JWT_ALGORITHM:-RS256}
       - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
     depends_on:
       mysql-db:
-        condition: service_healthy
-      redis-broker:
         condition: service_healthy
     networks:
       - saashr-network
@@ -96,11 +79,10 @@ services:
       - DATABASE_URL=mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-strongpassword123}@mysql-db:3306/hr_db
       - JWT_ALGORITHM=${JWT_ALGORITHM:-RS256}
       - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
-      - REDIS_URL=redis://redis-broker:6379/0
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+      - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
     depends_on:
       mysql-db:
-        condition: service_healthy
-      redis-broker:
         condition: service_healthy
     networks:
       - saashr-network
@@ -134,7 +116,6 @@ services:
 
 volumes:
   mysql-data:
-  redis-data:
 
 networks:
   saashr-network:
