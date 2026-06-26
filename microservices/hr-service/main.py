@@ -2,14 +2,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 from app.core.logging import setup_logging, correlation_id_ctx
-from app.core.worker import start_redis_listener
+from app.core.worker import start_sqs_consumer
 from app.routers import hr, health
 
 # 1. Initialize logging
 setup_logging()
 
-# 2. Start background Redis pub/sub listener
-start_redis_listener()
+# 2. Start background SQS consumer (tenant.status.changed events)
+start_sqs_consumer()
 
 app = FastAPI(title="SaaS HR Core Service", version="1.0.0")
 
