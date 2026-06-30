@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import httpx
+import os
 from typing import Dict, Any, List
 from app.database import get_db
 from app.schemas import (
@@ -17,7 +18,7 @@ from app.core.security import verify_password, create_access_token, get_current_
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
-TENANT_SERVICE_URL = "http://saashr-tenant:8001/api/v1/tenants"
+TENANT_SERVICE_URL = os.getenv("TENANT_SERVICE_URL", "http://saashr-tenant:8001/api/v1/tenants")
 
 async def fetch_tenant_by_subdomain(subdomain: str) -> Dict[str, Any]:
     async with httpx.AsyncClient() as client:
