@@ -17,10 +17,22 @@ export default function DepartmentsPage({ t, authFetch, user }) {
   const load = async () => {
     setLoading(true); setError('');
     try {
-      const res = await authFetch('/api/v1/hr/departments');
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      setDepartments(data.departments || data || []);
+      const [deptRes, empRes] = await Promise.all([
+        authFetch('/api/v1/hr/departments'),
+        authFetch('/api/v1/hr/employees'),
+      ]);
+      if (!deptRes.ok) throw new Error();
+      const deptData = await deptRes.json();
+      const depts = deptData.departments || deptData || [];
+
+      const countMap = {};
+      if (empRes.ok) {
+        const emps = await empRes.json().catch(() => []);
+        (Array.isArray(emps) ? emps : []).forEach(e => {
+          if (e.department_id) countMap[e.department_id] = (countMap[e.department_id] || 0) + 1;
+        });
+      }
+      setDepartments(depts.map(d => ({ ...d, employee_count: countMap[d.id] ?? 0 })));
     } catch { setError(t.errFetch); }
     finally { setLoading(false); }
   };

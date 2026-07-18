@@ -14,10 +14,10 @@ export default function MembersPage({ t, authFetch, user }) {
   const load = async () => {
     setLoading(true); setError('');
     try {
-      const res = await authFetch('/api/v1/tenants/members');
+      const res = await authFetch('/api/v1/auth/tenants/users');
       if (!res.ok) throw new Error();
-      const data = await res.json();
-      setMembers(data.members || data || []);
+      const data = await res.json().catch(() => []);
+      setMembers(Array.isArray(data) ? data : data.members || []);
     } catch { setError(t.errFetch); }
     finally { setLoading(false); }
   };
@@ -27,7 +27,7 @@ export default function MembersPage({ t, authFetch, user }) {
   const handleInvite = async (e) => {
     e.preventDefault(); setSaving(true);
     try {
-      const res = await authFetch('/api/v1/tenants/members/invite', { method: 'POST', body: JSON.stringify(inviteForm) });
+      const res = await authFetch('/api/v1/auth/tenants/users/invite', { method: 'POST', body: JSON.stringify(inviteForm) });
       if (!res.ok) throw new Error();
       setSuccess(t.memberInviteSuccess); setShowInvite(false); load();
     } catch { setError(t.errSave); }
@@ -37,7 +37,7 @@ export default function MembersPage({ t, authFetch, user }) {
   const handleRemove = async () => {
     setSaving(true);
     try {
-      const res = await authFetch(`/api/v1/tenants/members/${removeTarget.id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/v1/auth/tenants/users/${removeTarget.user_id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error();
       setSuccess(t.memberRemoveSuccess); setRemoveTarget(null); load();
     } catch { setError(t.errDelete); }
@@ -46,7 +46,7 @@ export default function MembersPage({ t, authFetch, user }) {
 
   const handleRoleChange = async (memberId, newRole) => {
     try {
-      const res = await authFetch(`/api/v1/tenants/members/${memberId}/role`, { method: 'PUT', body: JSON.stringify({ role: newRole }) });
+      const res = await authFetch(`/api/v1/auth/tenants/users/${memberId}/role`, { method: 'PUT', body: JSON.stringify({ role: newRole }) });
       if (!res.ok) throw new Error();
       setSuccess(t.memberRoleUpdated); load();
     } catch { setError(t.errSave); }
@@ -66,7 +66,7 @@ export default function MembersPage({ t, authFetch, user }) {
         ) : (
           <Table headers={['Member', 'Role', t.thActions]}>
             {members.map(m => (
-              <TR key={m.id}>
+              <TR key={m.user_id}>
                 <TD>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <Avatar email={m.email} size={36} />
@@ -83,7 +83,7 @@ export default function MembersPage({ t, authFetch, user }) {
                   {m.email === user.email || m.role === 'owner' ? (
                     <RoleBadge role={m.role} t={t} />
                   ) : (
-                    <select value={m.role} onChange={e => handleRoleChange(m.id, e.target.value)}
+                    <select value={m.role} onChange={e => handleRoleChange(m.user_id, e.target.value)}
                       style={{ padding: '4px 10px', borderRadius: '6px', border: `1px solid ${C.border}`, fontSize: '12px', fontWeight: '600', cursor: 'pointer', outline: 'none', backgroundColor: C.bgMid, color: C.textMid }}>
                       <option value='admin'>{t.roleAdmin}</option>
                       <option value='employee'>{t.roleEmployee}</option>
@@ -92,7 +92,7 @@ export default function MembersPage({ t, authFetch, user }) {
                 </TD>
                 <TD>
                   {m.email !== user.email && m.role !== 'owner' && (
-                    <Btn variant='danger' size='sm' onClick={() => setRemoveTarget(m)}>{t.memberRemove}</Btn>
+                    <Btn variant='danger' size='sm' onClick={() => setRemoveTarget(m)} disabled={!m.is_active}>{t.memberRemove}</Btn>
                   )}
                 </TD>
               </TR>

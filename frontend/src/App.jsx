@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import EmployeesPage from './pages/EmployeesPage';
 import DepartmentsPage from './pages/DepartmentsPage';
 import AttendancePage from './pages/AttendancePage';
+import LeavesPage from './pages/LeavesPage';
 import MembersPage from './pages/MembersPage';
 import ProfilePage from './pages/ProfilePage';
 
@@ -33,6 +34,7 @@ export default function App() {
     setToken(newToken); setUser(newUser);
     localStorage.setItem('token', newToken);
     localStorage.setItem('user', JSON.stringify(newUser));
+    setActiveTab(newUser.role === 'employee' ? 'attendance' : 'dashboard');
   };
 
   const handleLogout = () => {
@@ -59,7 +61,7 @@ export default function App() {
     employees:   <EmployeesPage {...pageProps} />,
     departments: <DepartmentsPage {...pageProps} />,
     attendance:  <AttendancePage {...pageProps} />,
-    leaves:      <AttendancePage {...pageProps} />,
+    leaves:      <LeavesPage {...pageProps} />,
     members:     <MembersPage {...pageProps} />,
     profile:     <ProfilePage {...pageProps} />,
   };

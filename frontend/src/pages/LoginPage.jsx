@@ -20,7 +20,7 @@ export default function LoginPage({ onLogin, lang, setLang, t }) {
       });
       if (!res.ok) { setError(t.loginError); return; }
       const data = await res.json();
-      onLogin(data.access_token, data.user || { email, role: 'employee' });
+      onLogin(data.access_token, { email: data.email || email, role: data.role || 'employee', tenant_id: data.active_tenant_id });
     } catch {
       setError(t.loginError);
     } finally {

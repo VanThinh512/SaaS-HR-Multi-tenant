@@ -2,12 +2,12 @@ import React from 'react';
 import { C, LangToggle, Avatar } from './ui';
 
 const NAV = [
-  { key: 'dashboard',   icon: '▦',  labelKey: 'menuDashboard' },
-  { key: 'employees',   icon: '👥', labelKey: 'menuEmployees' },
-  { key: 'departments', icon: '🏢', labelKey: 'menuDepartments' },
+  { key: 'dashboard',   icon: '▦',  labelKey: 'menuDashboard',   roles: ['admin', 'owner'] },
+  { key: 'employees',   icon: '👥', labelKey: 'menuEmployees',    roles: ['admin', 'owner'] },
+  { key: 'departments', icon: '🏢', labelKey: 'menuDepartments',  roles: ['admin', 'owner'] },
   { key: 'attendance',  icon: '⏱', labelKey: 'menuAttendance' },
   { key: 'leaves',      icon: '📋', labelKey: 'menuLeaves' },
-  { key: 'members',     icon: '💼', labelKey: 'menuMembers', adminOnly: true },
+  { key: 'members',     icon: '💼', labelKey: 'menuMembers',      roles: ['owner'] },
   { key: 'profile',     icon: '👤', labelKey: 'menuProfile' },
 ];
 
@@ -38,7 +38,7 @@ export default function Sidebar({ activeTab, setActiveTab, user, onLogout, lang,
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: '2px', overflowY: 'auto' }}>
-        {NAV.filter(item => !item.adminOnly || user.role === 'admin' || user.role === 'owner').map(item => {
+        {NAV.filter(item => !item.roles || item.roles.includes(user.role)).map(item => {
           const active = activeTab === item.key;
           return (
             <button
