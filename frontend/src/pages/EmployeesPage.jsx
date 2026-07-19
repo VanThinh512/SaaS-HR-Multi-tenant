@@ -11,7 +11,7 @@ export default function EmployeesPage({ t, authFetch, user }) {
   const [editing, setEditing] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ first_name: '', last_name: '', email: '', position: '', department_id: '', join_date: '', status: 'active' });
+  const [form, setForm] = useState({ first_name: '', last_name: '', email: '', position: '', department_id: '', joined_date: '', status: 'active' });
 
   const isAdmin = user.role === 'admin' || user.role === 'owner';
 
@@ -32,15 +32,16 @@ export default function EmployeesPage({ t, authFetch, user }) {
 
   useEffect(() => { load(); }, []);
 
-  const openAdd = () => { setEditing(null); setForm({ first_name: '', last_name: '', email: '', position: '', department_id: '', join_date: '', status: 'active' }); setShowModal(true); };
-  const openEdit = (emp) => { setEditing(emp); setForm({ first_name: emp.first_name || '', last_name: emp.last_name || '', email: emp.email || '', position: emp.position || '', department_id: emp.department_id || '', join_date: emp.join_date ? emp.join_date.slice(0, 10) : '', status: emp.status || 'active' }); setShowModal(true); };
+  const openAdd = () => { setEditing(null); setForm({ first_name: '', last_name: '', email: '', position: '', department_id: '', joined_date: '', status: 'active' }); setShowModal(true); };
+  const openEdit = (emp) => { setEditing(emp); setForm({ first_name: emp.first_name || '', last_name: emp.last_name || '', email: emp.email || '', position: emp.position || '', department_id: emp.department_id || '', joined_date: emp.joined_date ? emp.joined_date.slice(0, 10) : '', status: emp.status || 'active' }); setShowModal(true); };
 
   const handleSave = async (e) => {
     e.preventDefault(); setSaving(true);
     try {
       const method = editing ? 'PUT' : 'POST';
       const url = editing ? `/api/v1/hr/employees/${editing.id}` : '/api/v1/hr/employees';
-      const res = await authFetch(url, { method, body: JSON.stringify(form) });
+      const payload = { ...form, joined_date: form.joined_date || null, department_id: form.department_id || null };
+      const res = await authFetch(url, { method, body: JSON.stringify(payload) });
       if (!res.ok) throw new Error();
       setSuccess(editing ? t.empEditSuccess : t.empAddSuccess);
       setShowModal(false); load();
@@ -85,7 +86,7 @@ export default function EmployeesPage({ t, authFetch, user }) {
                 <TD>{emp.position || '—'}</TD>
                 <TD style={{ color: C.textMuted }}>{emp.email}</TD>
                 <TD>{deptName(emp.department_id)}</TD>
-                <TD style={{ color: C.textMuted }}>{emp.join_date ? emp.join_date.slice(0, 10) : '—'}</TD>
+                <TD style={{ color: C.textMuted }}>{emp.joined_date ? emp.joined_date.slice(0, 10) : '—'}</TD>
                 <TD><StatusBadge status={emp.status} t={t} /></TD>
                 {isAdmin && (
                   <TD>
@@ -121,7 +122,7 @@ export default function EmployeesPage({ t, authFetch, user }) {
               </select>
             </FormField>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-              <FormField label={t.labelJoinDate}>{inp('join_date', 'date')}</FormField>
+              <FormField label={t.labelJoinDate}>{inp('joined_date', 'date')}</FormField>
               <FormField label={t.labelStatus}>
                 <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
                   style={{ ...inputStyle }}

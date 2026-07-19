@@ -1,7 +1,7 @@
 # pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional
 from app.models import Department, Employee, Attendance, LeaveRequest
 from app.schemas import EmployeeCreate, EmployeeUpdate, DepartmentCreate, DepartmentUpdate, LeaveRequestCreate
@@ -66,7 +66,7 @@ def create_employee(db: Session, tenant_id: str, payload: EmployeeCreate) -> Emp
         email=payload.email,
         department_id=payload.department_id,
         position=payload.position,
-        joined_date=payload.joined_date,
+        joined_date=payload.joined_date or date.today(),
         status="active"
     )
     db.add(db_emp)

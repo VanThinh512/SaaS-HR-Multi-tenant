@@ -29,7 +29,7 @@ class EmployeeCreate(BaseModel):
     email: EmailStr
     department_id: Optional[str] = None
     position: str
-    joined_date: date
+    joined_date: Optional[date] = None
 
 class EmployeeUpdate(BaseModel):
     """Schema cập nhật nhân viên — tất cả trường đều tùy chọn (partial update)."""
